@@ -143,7 +143,7 @@ WHERE TABLE_NAME = '{table_name}' AND TABLE_SCHEMA = '{schema_name}'
         if unique_constraints and UNIQUE_CONFLICT_METHOD_UPDATE == unique_conflict_method:
             full_table_name_temp = self.full_table_name(schema_name, table_name, prefix='temp_')
             drop_temp_table_command = f'DROP TABLE IF EXISTS {full_table_name_temp}'
-            truncate_temp_table_command = f'DROP TABLE IF EXISTS {full_table_name_temp}'
+            truncate_temp_table_command = f'TRUNCATE TABLE {full_table_name_temp}'
             unique_constraints_clean = [
                 f'{self.clean_column_name(col)}'
                 for col in unique_constraints
