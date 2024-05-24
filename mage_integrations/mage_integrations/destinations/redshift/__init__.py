@@ -143,6 +143,7 @@ WHERE TABLE_NAME = '{table_name}' AND TABLE_SCHEMA = '{schema_name}'
         if unique_constraints and UNIQUE_CONFLICT_METHOD_UPDATE == unique_conflict_method:
             full_table_name_temp = self.full_table_name(schema_name, table_name, prefix='temp_')
             drop_temp_table_command = f'DROP TABLE IF EXISTS {full_table_name_temp}'
+            truncate_temp_table_command = f'DROP TABLE IF EXISTS {full_table_name_temp}'
             unique_constraints_clean = [
                 f'{self.clean_column_name(col)}'
                 for col in unique_constraints
@@ -178,7 +179,7 @@ WHERE TABLE_NAME = '{table_name}' AND TABLE_SCHEMA = '{schema_name}'
                 drop_duplicate_records_from_temp,
                 delete_records_from_full_table,
                 insert_records_from_temp_table,
-                drop_temp_table_command,
+                truncate_temp_table_command,
             ]
 
         # Not query data from stl_insert table anymore since it's inefficient.
