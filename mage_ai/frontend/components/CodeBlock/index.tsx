@@ -37,11 +37,7 @@ import CodeEditor, {
 } from '@components/CodeEditor';
 import CodeOutput from './CodeOutput';
 import CommandButtons, { CommandButtonsSharedProps } from './CommandButtons';
-import ConfigurationOptionType, {
-  ConfigurationTypeEnum,
-  OptionTypeEnum,
-  ResourceTypeEnum,
-} from '@interfaces/ConfigurationOptionType';
+import ConfigurationOptionType from '@interfaces/ConfigurationOptionType';
 import DataIntegrationBlock from './DataIntegrationBlock';
 import DataProviderType, {
   DataProviderEnum,
@@ -169,15 +165,17 @@ import {
   buildBorderProps,
   buildConvertBlockMenuItems,
   calculateOffsetPercentage,
+  getCodeCollapsedUUID,
   getDownstreamBlockUuids,
   getMessagesWithType,
+  getOutputCollapsedUUID,
   getUpstreamBlockUuids,
   hasErrorOrOutput,
 } from './utils';
 import { capitalize, pluralize } from '@utils/string';
 import { convertValueToVariableDataType } from '@utils/models/interaction';
 import { executeCode } from '@components/CodeEditor/keyboard_shortcuts/shortcuts';
-import { find, indexBy, sum } from '@utils/array';
+import { find, indexBy, sum, uniqueArray } from '@utils/array';
 import { get, set } from '@storage/localStorage';
 import { getModelName } from '@utils/models/dbt';
 import { initializeContentAndMessages } from '@components/PipelineDetail/utils';
@@ -217,6 +215,7 @@ type CodeBlockProps = {
   cursorHeight2?: number;
   cursorHeight3?: number;
   dataProviders?: DataProviderType[];
+  dbtConfigurationOptions?: ConfigurationOptionType[]
   defaultValue?: string;
   disableDrag?: boolean;
   disableShortcuts?: boolean;
@@ -228,6 +227,7 @@ type CodeBlockProps = {
   hideExtraCommandButtons?: boolean;
   hideExtraConfiguration?: boolean;
   hideHeaderInteractiveInformation?: boolean;
+  hideOutputOnExecution?: boolean;
   hideRunButton?: boolean;
   interactionsMapping?: {
     [interactionUUID: string]: InteractionType;
@@ -348,6 +348,7 @@ function CodeBlock({
   cursorHeight2,
   cursorHeight3,
   dataProviders,
+  dbtConfigurationOptions,
   defaultValue = '',
   deleteBlock,
   disableDrag,
@@ -361,6 +362,7 @@ function CodeBlock({
   hideExtraCommandButtons,
   hideExtraConfiguration,
   hideHeaderInteractiveInformation,
+  hideOutputOnExecution,
   hideRunButton,
   interactionsMapping,
   interruptKernel,
@@ -422,7 +424,12 @@ function CodeBlock({
   } = useProject();
   const { status } = useStatus();
 
-  const codeBlockV2 = useMemo(() => featureEnabled?.(featureUUIDs.CODE_BLOCK_V2), [
+  /*
+   * Currently, only the dbt blocks are using V2 of the code block.
+   * Change "featureUUIDs.DBT_V2" for the featureEnabled property below
+   * to "featureUUIDs.CODE_BLOCK_V2" when all block types are using V2.
+   */
+  const codeBlockV2 = useMemo(() => featureEnabled?.(featureUUIDs.DBT_V2), [
     featureEnabled,
     featureUUIDs,
   ]);
@@ -755,19 +762,8 @@ function CodeBlock({
     drop: (item: BlockType) => onDrop?.(block, item),
   }), [block]);
 
-  const { data: dataConfigurationOptions } = api.configuration_options.pipelines.list(isDBT ? pipelineUUID : null, {
-    configuration_type: ConfigurationTypeEnum.DBT,
-    option_type: OptionTypeEnum.PROJECTS,
-    resource_type: ResourceTypeEnum.Block,
-    resource_uuid: BlockLanguageEnum.SQL === blockLanguage ? blockUUID : null,
-  }, {
-    revalidateOnFocus: false,
-  });
-  const configurationOptions: ConfigurationOptionType[] =
-    useMemo(() => dataConfigurationOptions?.configuration_options, [dataConfigurationOptions]);
-
-  const dbtProjects = useMemo(() => indexBy(configurationOptions || [], ({ uuid }) => uuid), [
-    configurationOptions,
+  const dbtProjects = useMemo(() => indexBy(dbtConfigurationOptions || [], ({ uuid }) => uuid), [
+    dbtConfigurationOptions,
   ]);
 
   const dbtProjectName =
@@ -776,7 +772,7 @@ function CodeBlock({
     ]);
 
   const dbtProfileData = useMemo(() => {
-    if (!configurationOptions) {
+    if (!dbtConfigurationOptions) {
       return [
         dbtProjects[dbtProjectName] || {
           target: null,
@@ -785,20 +781,26 @@ function CodeBlock({
       ];
     }
 
-    const configOpts = configurationOptions?.length === 1
-      ? configurationOptions?.[0]
-      : configurationOptions?.find(({ uuid }) => dbtProjectName === uuid);
+    const configOpts = dbtConfigurationOptions?.length === 1
+      ? dbtConfigurationOptions?.[0]
+      : dbtConfigurationOptions?.find(({ uuid }) => dbtProjectName === uuid);
 
     return configOpts?.option?.profiles || [];
   }, [
-    configurationOptions,
+    dbtConfigurationOptions,
     dbtProjectName,
     dbtProjects,
   ]);
 
-  const dbtProfileTargets = useMemo(() => {
-    return (dbtProfileData || [])?.reduce((acc, { targets }) => acc.concat(targets || []), []);
-  }, [dbtProfileData]);
+  const dbtProfileTargets = useMemo(() =>
+    uniqueArray(
+      (dbtProfileData || [])?.reduce(
+        (acc, { targets }) => acc.concat(targets || []),
+        [],
+      ),
+    ),
+    [dbtProfileData],
+  );
 
   const dbtProfileTarget = useMemo(() => dataProviderConfig[CONFIG_KEY_DBT_PROFILE_TARGET], [
     dataProviderConfig,
@@ -865,13 +867,14 @@ function CodeBlock({
     dataProviders,
   ]);
 
-  const codeCollapsedUUID = useMemo(() => (
-    `${pipelineUUID}/${blockUUID}/codeCollapsed`
-  ), [pipelineUUID, blockUUID]);
-
-  const outputCollapsedUUID = useMemo(() => (
-    `${pipelineUUID}/${blockUUID}/outputCollapsed`
-  ), [pipelineUUID, blockUUID]);
+  const codeCollapsedUUID = useMemo(
+    () => getCodeCollapsedUUID(pipelineUUID, blockUUID),
+    [pipelineUUID, blockUUID],
+  );
+  const outputCollapsedUUID = useMemo(
+    () => getOutputCollapsedUUID(pipelineUUID, blockUUID),
+    [pipelineUUID, blockUUID],
+  );
 
   useEffect(() => {
     setCodeCollapsed(get(codeCollapsedUUID, false));
@@ -930,7 +933,7 @@ function CodeBlock({
       && !isStreamingPipeline
       && !isDataIntegration
       && BlockLanguageEnum.PYTHON === blockLanguage
-      && (PipelineTypeEnum.PYSPARK === pipeline?.type || !project?.emr_config)
+      && (PipelineTypeEnum.PYSPARK === pipeline?.type || !project?.emr_config),
     );
   }, [
     blockLanguage,
@@ -954,8 +957,8 @@ function CodeBlock({
   const runBlockAndTrack = useCallback((payload?: RunBlockAndTrackProps) => {
     if (sideBySideEnabled) {
       dispatchEventSyncColumnPositions({
-        columnIndex: scrollTogether ? 2 : 1,
         bypassOffScreen: scrollTogether,
+        columnIndex: scrollTogether ? 2 : 1,
         ...(payload?.syncColumnPositions || {
           rect: refColumn2?.current?.getBoundingClientRect(),
           y: refColumn1?.current?.getBoundingClientRect()?.y,
@@ -1000,7 +1003,7 @@ function CodeBlock({
         Object.entries(interaction?.variables || {}).forEach(([
           variableUUID,
           {
-            types
+            types,
           },
         ]) => {
           if (variablesToUse && variableUUID in variablesToUse) {
@@ -1027,13 +1030,17 @@ function CodeBlock({
         || dataProviderConfig?.[CONFIG_KEY_USE_RAW_SQL]
         || [
           BlockTypeEnum.SCRATCHPAD,
-        ].includes(blockType)
+        ].includes(blockType),
     });
 
     if (!disableReset) {
       setRunCount(1 + Number(runCount));
       setRunEndTime(null);
-      setOutputCollapsed(false);
+      if (hideOutputOnExecution) {
+        setOutputCollapsed(true);
+      } else {
+        setOutputCollapsed(false);
+      }
     }
 
     if (sparkEnabled) {
@@ -1041,10 +1048,13 @@ function CodeBlock({
     }
   }, [
     blockInteractions,
+    blockType,
     content,
     dataProviderConfig,
+    dispatchEventSyncColumnPositions,
     fetchExecutionStates,
     hasDownstreamWidgets,
+    hideOutputOnExecution,
     interactionsMapping,
     isDBT,
     refColumn1,
@@ -1388,6 +1398,7 @@ function CodeBlock({
     blocks,
     codeCollapsed,
     content,
+    dbtConfigurationOptions,
     deleteBlock: deleteBlockCallback,
     disableShortcuts,
     executionState,

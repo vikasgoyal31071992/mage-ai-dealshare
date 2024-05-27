@@ -284,8 +284,7 @@ class PipelineScheduler:
                     or PipelineRun.PipelineRunStatus.FAILED
                 )
                 self.pipeline_run.update(status=status)
-
-                self.on_pipeline_run_failure('Pipeline run timed out.')
+                self.on_pipeline_run_failure('Pipeline run timed out.', status=status)
             elif self.pipeline_run.any_blocks_failed() and not self.allow_blocks_to_fail:
                 self.pipeline_run.update(
                     status=PipelineRun.PipelineRunStatus.FAILED)
@@ -318,21 +317,38 @@ class PipelineScheduler:
                     self.__schedule_blocks(block_runs)
 
     @safe_db_query
-    def on_pipeline_run_failure(self, error_msg: str) -> None:
-        failed_block_runs = self.pipeline_run.failed_block_runs
-        for br in failed_block_runs:
-            if br.metrics:
-                message = br.metrics.get('error', {}).get('message')
-                if message:
-                    error_msg += f'\nError for block {br.block_uuid}:\n{message}'
-                    break
-
+    def on_pipeline_run_failure(
+        self,
+        error_msg: str,
+        status=PipelineRun.PipelineRunStatus.FAILED,
+    ) -> None:
         asyncio.run(UsageStatisticLogger().pipeline_run_ended(self.pipeline_run))
-        self.notification_sender.send_pipeline_run_failure_message(
-            pipeline=self.pipeline,
-            pipeline_run=self.pipeline_run,
-            error=error_msg,
-        )
+
+        if status == PipelineRun.PipelineRunStatus.FAILED:
+            # Only send notification when pipeline run status is FAILED
+            failed_block_runs = self.pipeline_run.failed_block_runs
+            stacktrace = None
+            for br in failed_block_runs:
+                if br.metrics:
+                    message = br.metrics.get('error', {}).get('message')
+                    if message:
+                        message_split = message.split('\n')
+                        # Truncate the error message if it has too many lines, set max
+                        # lines at 50
+                        if len(message_split) > 50:
+                            message_split = message_split[-50:]
+                            message_split.insert(0, '... (error truncated)')
+                        message = '\n'.join(message_split)
+                        stacktrace = f'Error for block {br.block_uuid}:\n{message}'
+                        break
+
+            self.notification_sender.send_pipeline_run_failure_message(
+                pipeline=self.pipeline,
+                pipeline_run=self.pipeline_run,
+                error=error_msg,
+                stacktrace=stacktrace,
+            )
+
         # Cancel block runs that are still in progress for the pipeline run.
         cancel_block_runs_and_jobs(self.pipeline_run, self.pipeline)
 
@@ -821,6 +837,8 @@ class PipelineScheduler:
         Returns:
             List[BlockRun]: A list of crashed block runs.
         """
+        for b in self.pipeline_run.block_runs:
+            b.refresh()
         running_or_queued_block_runs = [b for b in self.pipeline_run.block_runs if b.status in [
             BlockRun.BlockRunStatus.RUNNING,
             BlockRun.BlockRunStatus.QUEUED,
@@ -1670,7 +1688,11 @@ def gen_pipeline_with_schedules_single_project(
     # Iterate through pipeline schedules by pipeline to handle pipeline run limits for
     # each pipeline.
     for pipeline_uuid, active_schedules in pipeline_schedules_by_pipeline.items():
-        pipeline = Pipeline.get(pipeline_uuid)
+        try:
+            pipeline = Pipeline.get(pipeline_uuid)
+        except Exception as e:
+            print(f'Error fetching pipeline {pipeline_uuid}: {e}')
+            continue
         yield pipeline_uuid, pipeline, active_schedules
 
 
@@ -1731,11 +1753,15 @@ def gen_pipeline_with_schedules_project_platform(
     for pair in pipeline_schedules_by_pipeline_by_repo_path.items():
         repo_path, pipeline_schedules_by_pipeline = pair
         for pipeline_uuid, active_schedules in pipeline_schedules_by_pipeline.items():
-            pipeline = get_pipeline_from_platform(
-                pipeline_uuid,
-                repo_path=repo_path,
-                mapping=pipeline_schedule_repo_paths_to_repo_path_mapping,
-            )
+            try:
+                pipeline = get_pipeline_from_platform(
+                    pipeline_uuid,
+                    repo_path=repo_path,
+                    mapping=pipeline_schedule_repo_paths_to_repo_path_mapping,
+                )
+            except Exception as e:
+                print(f'Error fetching pipeline {pipeline_uuid}: {e}')
+                continue
             yield pipeline_uuid, pipeline, active_schedules
 
 

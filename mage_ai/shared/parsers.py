@@ -25,11 +25,13 @@ MAX_ITEMS_IN_SAMPLE_OUTPUT = 20
 
 
 def encode_complex(obj):
+    from mage_ai.shared.models import BaseDataClass
+
     if isinstance(obj, set):
         return list(obj)
     elif isinstance(obj, BaseModel):
         return obj.__class__.__name__
-    elif obj.__class__.__name__ == 'BaseDataClass':
+    elif obj.__class__.__name__ == 'BaseDataClass' or isinstance(obj, BaseDataClass):
         return obj.to_dict()
     elif isinstance(obj, Enum):
         return obj.value
@@ -59,6 +61,9 @@ def encode_complex(obj):
         return obj.to_dict(orient='records')
     elif isinstance(obj, pd.Series):
         return obj.to_list()
+    # Convert pandas._libs.missing.NAType to None
+    elif isinstance(obj, pd._libs.missing.NAType):
+        return None
 
     return obj
 

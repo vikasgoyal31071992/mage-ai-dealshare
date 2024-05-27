@@ -90,7 +90,7 @@ from mage_ai.data_preparation.templates.data_integrations.utils import get_templ
 from mage_ai.data_preparation.templates.template import load_template
 from mage_ai.server.kernel_output_parser import DataType
 from mage_ai.services.spark.config import SparkConfig
-from mage_ai.services.spark.spark import get_spark_session
+from mage_ai.services.spark.spark import SPARK_ENABLED, get_spark_session
 from mage_ai.settings.platform.constants import project_platform_activated
 from mage_ai.settings.repo import get_repo_path
 from mage_ai.shared.array import unique_by
@@ -339,7 +339,6 @@ class Block(DataIntegrationMixin, SparkBlock, ProjectPlatformAccessible):
         self.upstream_blocks = []
         self.downstream_blocks = []
         self.test_functions = []
-        self.global_vars = {}
         self.template_runtime_configuration = {}
 
         self.dynamic_block_index = None
@@ -725,41 +724,6 @@ class Block(DataIntegrationMixin, SparkBlock, ProjectPlatformAccessible):
             )
 
     @classmethod
-    def block_class_from_type(self, block_type: str, language=None, pipeline=None) -> 'Block':
-        from mage_ai.data_preparation.models.block.constants import BLOCK_TYPE_TO_CLASS
-        from mage_ai.data_preparation.models.block.integration import (
-            DestinationBlock,
-            SourceBlock,
-            TransformerBlock,
-        )
-        from mage_ai.data_preparation.models.block.r import RBlock
-        from mage_ai.data_preparation.models.block.sql import SQLBlock
-        from mage_ai.data_preparation.models.widget import Widget
-
-        if BlockType.CHART == block_type:
-            return Widget
-        elif BlockType.DBT == block_type:
-            from mage_ai.data_preparation.models.block.dbt import DBTBlock
-
-            return DBTBlock
-        elif pipeline and PipelineType.INTEGRATION == pipeline.type:
-            if BlockType.CALLBACK == block_type:
-                return CallbackBlock
-            elif BlockType.CONDITIONAL == block_type:
-                return ConditionalBlock
-            elif BlockType.DATA_LOADER == block_type:
-                return SourceBlock
-            elif BlockType.DATA_EXPORTER == block_type:
-                return DestinationBlock
-            else:
-                return TransformerBlock
-        elif BlockLanguage.SQL == language:
-            return SQLBlock
-        elif BlockLanguage.R == language:
-            return RBlock
-        return BLOCK_TYPE_TO_CLASS.get(block_type)
-
-    @classmethod
     def create(
         self,
         name: str,
@@ -778,6 +742,8 @@ class Block(DataIntegrationMixin, SparkBlock, ProjectPlatformAccessible):
         widget: bool = False,
         downstream_block_uuids: List[str] = None,
     ) -> 'Block':
+        from mage_ai.data_preparation.models.block.block_factory import BlockFactory
+
         """
         1. Create a new folder for block_type if not exist
         2. Create a new python file with code template
@@ -871,7 +837,11 @@ class Block(DataIntegrationMixin, SparkBlock, ProjectPlatformAccessible):
                     language,
                 )
 
-        block = self.block_class_from_type(block_type, pipeline=pipeline)(
+        block = BlockFactory.block_class_from_type(
+            block_type,
+            language=language,
+            pipeline=pipeline,
+        )(
             name,
             uuid,
             block_type,
@@ -933,42 +903,15 @@ class Block(DataIntegrationMixin, SparkBlock, ProjectPlatformAccessible):
         return block_uuids
 
     @classmethod
-    def get_block(
-        self,
-        name,
-        uuid,
-        block_type,
-        configuration=None,
-        content=None,
-        language=None,
-        pipeline=None,
-        status=BlockStatus.NOT_EXECUTED,
-    ) -> 'Block':
-        block_class = self.block_class_from_type(
-            block_type,
-            language=language,
-            pipeline=pipeline,
-        ) or Block
-        return block_class(
-            name,
-            uuid,
-            block_type,
-            configuration=configuration,
-            content=content,
-            language=language,
-            pipeline=pipeline,
-            status=status,
-        )
-
-    @classmethod
     def get_block_from_file_path(self, file_path: str) -> 'Block':
         parts = get_path_parts(file_path)
 
         if parts and len(parts) >= 3:
+            from mage_ai.data_preparation.models.block.block_factory import BlockFactory
+
             # If file_path == transformers/test4.py
             # parts ==
             # ('/home/src/default_repo/default_platform2/project3', 'transformers', 'test4.py')
-
             # If project platform platform activated, then parts ==
             # ('/home/src', 'default_repo', 'data_loaders/astral_violet.py')
 
@@ -987,7 +930,7 @@ class Block(DataIntegrationMixin, SparkBlock, ProjectPlatformAccessible):
             configuration = dict(file_path=file_path, file_source=dict(path=file_path))
             language = FILE_EXTENSION_TO_BLOCK_LANGUAGE.get(extension)
 
-            return self.get_block(
+            return BlockFactory.get_block(
                 block_uuid,
                 block_uuid,
                 block_type,
@@ -1179,6 +1122,7 @@ class Block(DataIntegrationMixin, SparkBlock, ProjectPlatformAccessible):
         data_integration_runtime_settings: Dict = None,
         execution_partition_previous: str = None,
         metadata: Dict = None,
+        override_outputs: bool = True,
         **kwargs,
     ) -> Dict:
         if logging_tags is None:
@@ -1198,7 +1142,7 @@ class Block(DataIntegrationMixin, SparkBlock, ProjectPlatformAccessible):
                         f'Please run upstream blocks {upstream_block_uuids} '
                         'before running the current block.'
                     )
-            global_vars = self.__enrich_global_vars(
+            global_vars = self.enrich_global_vars(
                 global_vars,
                 dynamic_block_index=dynamic_block_index,
             )
@@ -1270,7 +1214,7 @@ class Block(DataIntegrationMixin, SparkBlock, ProjectPlatformAccessible):
                         DX_PRINTER.critical(
                             block=self,
                             execution_partition=execution_partition,
-                            override_outputs=True,
+                            override_outputs=override_outputs,
                             dynamic_block_uuid=dynamic_block_uuid,
                             __uuid='store_variables',
                         )
@@ -1278,7 +1222,7 @@ class Block(DataIntegrationMixin, SparkBlock, ProjectPlatformAccessible):
                         self.store_variables(
                             variable_mapping,
                             execution_partition=execution_partition,
-                            override_outputs=True,
+                            override_outputs=override_outputs,
                             spark=self.__get_spark_session_from_global_vars(
                                 global_vars=global_vars,
                             ),
@@ -1673,7 +1617,7 @@ class Block(DataIntegrationMixin, SparkBlock, ProjectPlatformAccessible):
 
         block_function = self._validate_execution(decorated_functions, input_vars)
         if block_function is not None:
-            if logger and 'logger' not in global_vars:
+            if logger:
                 global_vars['logger'] = logger
 
             track_spark = from_notebook and self.should_track_spark()
@@ -1837,6 +1781,7 @@ class Block(DataIntegrationMixin, SparkBlock, ProjectPlatformAccessible):
             global_vars=global_vars,
             metadata=metadata,
             upstream_block_uuids_override=upstream_block_uuids_override,
+            current_block=self,
         )
 
         return variables
@@ -2443,11 +2388,22 @@ df = get_variable('{self.pipeline.uuid}', '{self.uuid}', 'df')
 
     def get_executor_type(self) -> str:
         if self.executor_type:
-            return Template(self.executor_type).render(**get_template_vars())
-        return self.executor_type
+            block_executor_type = Template(self.executor_type).render(**get_template_vars())
+        else:
+            block_executor_type = None
+        if not block_executor_type or block_executor_type == ExecutorType.LOCAL_PYTHON:
+            # If block executor_type is not set, fall back to pipeline level executor_type
+            if self.pipeline:
+                pipeline_executor_type = self.pipeline.get_executor_type()
+            else:
+                pipeline_executor_type = None
+            block_executor_type = pipeline_executor_type or block_executor_type
+        return block_executor_type
 
-    def get_pipelines_from_cache(self) -> List[Dict]:
-        arr = BlockCache().get_pipelines(self)
+    def get_pipelines_from_cache(self, block_cache: BlockCache = None) -> List[Dict]:
+        if block_cache is None:
+            block_cache = BlockCache()
+        arr = block_cache.get_pipelines(self)
 
         return unique_by(
             arr,
@@ -2498,11 +2454,13 @@ df = get_variable('{self.pipeline.uuid}', '{self.uuid}', 'df')
     def to_dict(
         self,
         include_block_catalog: bool = False,
+        include_block_pipelines: bool = False,
         include_callback_blocks: bool = False,
         include_content: bool = False,
         include_outputs: bool = False,
         include_outputs_spark: bool = False,
         sample_count: int = None,
+        block_cache: BlockCache = None,
         check_if_file_exists: bool = False,
         **kwargs,
     ) -> Dict:
@@ -2515,6 +2473,9 @@ df = get_variable('{self.pipeline.uuid}', '{self.uuid}', 'df')
 
         if include_block_catalog and self.is_data_integration() and self.pipeline:
             data['catalog'] = self.get_catalog_from_file()
+
+        if include_block_pipelines:
+            data['pipelines'] = self.get_pipelines_from_cache(block_cache=block_cache)
 
         if include_outputs:
             include_outputs_use = include_outputs
@@ -2552,6 +2513,7 @@ df = get_variable('{self.pipeline.uuid}', '{self.uuid}', 'df')
         include_outputs: bool = False,
         include_outputs_spark: bool = False,
         sample_count: int = None,
+        block_cache: BlockCache = None,
         check_if_file_exists: bool = False,
         **kwargs,
     ) -> Dict:
@@ -2597,7 +2559,7 @@ df = get_variable('{self.pipeline.uuid}', '{self.uuid}', 'df')
             data['tags'] = self.tags()
 
         if include_block_pipelines:
-            data['pipelines'] = self.get_pipelines_from_cache()
+            data['pipelines'] = self.get_pipelines_from_cache(block_cache=block_cache)
 
         return data
 
@@ -3038,11 +3000,13 @@ df = get_variable('{self.pipeline.uuid}', '{self.uuid}', 'df')
         variable_mapping = merge_dict(output_variables, consolidated_print_variables)
         return variable_mapping
 
-    def __enrich_global_vars(
+    def enrich_global_vars(
         self,
         global_vars: Dict = None,
         dynamic_block_index: int = None,
     ) -> Dict:
+        from mage_ai.data_preparation.models.block.remote.models import RemoteBlock
+
         """
         Enriches the provided global variables dictionary with additional context, Spark session,
         environment, configuration, and an empty context dictionary.
@@ -3089,11 +3053,19 @@ df = get_variable('{self.pipeline.uuid}', '{self.uuid}', 'df')
         if dynamic_block_index is not None:
             global_vars['dynamic_block_index'] = dynamic_block_index
 
+        # Remote blocks
+        if global_vars.get('remote_blocks'):
+            global_vars['remote_blocks'] = [RemoteBlock.load(
+                **remote_block_dict,
+            ).get_outputs() for remote_block_dict in global_vars['remote_blocks']]
+
         self.global_vars = global_vars
 
         return global_vars
 
     def get_spark_session(self):
+        if not SPARK_ENABLED:
+            return None
         if self.spark_init and (not self.pipeline or
                                 not self.pipeline.spark_config):
             return self.spark
@@ -3521,12 +3493,15 @@ df = get_variable('{self.pipeline.uuid}', '{self.uuid}', 'df')
 
             cache = BlockCache()
             if detach:
+                from mage_ai.data_preparation.models.block.block_factory import (
+                    BlockFactory,
+                )
                 """"
                 New block added to pipeline, so it must be added to the block cache.
                 Old block no longer in pipeline, so it must be removed from block cache.
                 """
                 cache.add_pipeline(self, self.pipeline)
-                old_block = self.get_block(
+                old_block = BlockFactory.get_block(
                     old_uuid,
                     old_uuid,
                     self.type,
@@ -3659,23 +3634,29 @@ class AddonBlock(Block):
             global_vars['dynamic_block_index'] = dynamic_block_index
 
         if parent_block:
+            if parent_block.global_vars is None:
+                global_vars_copy = global_vars.copy()
+                parent_block.enrich_global_vars(
+                    global_vars=global_vars_copy,
+                    dynamic_block_index=dynamic_block_index,
+                )
+            global_vars = merge_dict(parent_block.global_vars, global_vars)
             global_vars['parent_block_uuid'] = parent_block.uuid
 
-        if parent_block and \
-                parent_block.pipeline and \
-                PipelineType.INTEGRATION == parent_block.pipeline.type:
+            if parent_block.pipeline and \
+                    PipelineType.INTEGRATION == parent_block.pipeline.type:
 
-            template_runtime_configuration = parent_block.template_runtime_configuration
-            index = template_runtime_configuration.get('index', None)
-            is_last_block_run = template_runtime_configuration.get('is_last_block_run', False)
-            selected_streams = template_runtime_configuration.get('selected_streams', [])
-            stream = selected_streams[0] if len(selected_streams) >= 1 else None
-            destination_table = template_runtime_configuration.get('destination_table', stream)
+                template_runtime_configuration = parent_block.template_runtime_configuration
+                index = template_runtime_configuration.get('index', None)
+                is_last_block_run = template_runtime_configuration.get('is_last_block_run', False)
+                selected_streams = template_runtime_configuration.get('selected_streams', [])
+                stream = selected_streams[0] if len(selected_streams) >= 1 else None
+                destination_table = template_runtime_configuration.get('destination_table', stream)
 
-            global_vars['index'] = index
-            global_vars['is_last_block_run'] = is_last_block_run
-            global_vars['stream'] = stream
-            global_vars['destination_table'] = destination_table
+                global_vars['index'] = index
+                global_vars['is_last_block_run'] = is_last_block_run
+                global_vars['stream'] = stream
+                global_vars['destination_table'] = destination_table
 
         return global_vars
 

@@ -48,6 +48,7 @@ from mage_ai.data_preparation.models.constants import (
     PipelineType,
 )
 from mage_ai.data_preparation.models.pipeline import Pipeline
+from mage_ai.data_preparation.models.project import Project
 from mage_ai.data_preparation.models.triggers import (
     ScheduleInterval,
     ScheduleStatus,
@@ -934,9 +935,12 @@ class PipelineRun(PipelineRunProjectPlatformMixin, BaseModel):
 
     @property
     def pipeline_tags(self):
-        pipeline = Pipeline.get(self.pipeline_uuid, check_if_exists=True)
+        try:
+            pipeline_config = Pipeline.get_config(self.pipeline_uuid)
+        except Exception:
+            pipeline_config = dict()
 
-        return pipeline.tags if pipeline is not None else []
+        return pipeline_config.get('tags') if pipeline_config is not None else []
 
     def executable_block_runs(
         self,
@@ -989,6 +993,9 @@ class PipelineRun(PipelineRunProjectPlatformMixin, BaseModel):
         block_runs_all = []
 
         data_integration_block_uuids_mapping = {}
+
+        pipeline_project = Project(pipeline.repo_config)
+
         for block_run in self.block_runs:
             block_runs_all.append(block_run)
 
@@ -1021,7 +1028,7 @@ class PipelineRun(PipelineRunProjectPlatformMixin, BaseModel):
                 "original": 1,
             }
             """
-            if metrics and block and block.is_data_integration():
+            if metrics and block and block.is_data_integration(pipeline_project=pipeline_project):
                 original_block_uuid = metrics.get('original_block_uuid')
 
                 if original_block_uuid and metrics.get('child'):
@@ -1906,3 +1913,24 @@ class Backfill(BaseModel):
                 Backfill.pipeline_schedule_id.in_(pipeline_schedule_ids),
             )
         return []
+
+    @property
+    def pipeline_run_status_counts(self) -> Dict:
+        status_counts = dict()
+        execution_dates_counted = set()
+
+        # Sort the pipeline runs by id in reverse order so the first pipeline run
+        # checked is the latest pipeline run created for a given execution date.
+        pipeline_runs_sorted = sorted(
+            self.pipeline_runs,
+            key=lambda pr: (pr.execution_date, pr.id),
+            reverse=True,
+        )
+
+        for pr in pipeline_runs_sorted:
+            # Only count a pipeline run once per execution date
+            if pr.execution_date not in execution_dates_counted:
+                status_counts[pr.status] = (status_counts.get(pr.status) or 0) + 1
+                execution_dates_counted.add(pr.execution_date)
+
+        return status_counts

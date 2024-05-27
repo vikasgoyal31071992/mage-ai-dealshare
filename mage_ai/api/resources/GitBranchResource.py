@@ -1,15 +1,21 @@
 import os
-from typing import Dict, List
+from typing import Dict, List, Tuple
 
 from mage_ai.api.errors import ApiError
 from mage_ai.api.resources.GenericResource import GenericResource
 from mage_ai.authentication.oauth.constants import ProviderName
 from mage_ai.data_preparation.git import REMOTE_NAME, Git, api
 from mage_ai.data_preparation.git.clients.base import Client as GitClient
-from mage_ai.data_preparation.git.utils import get_provider_from_remote_url
+from mage_ai.data_preparation.git.utils import (
+    get_oauth_access_token_for_user,
+    get_provider_from_remote_url,
+)
 from mage_ai.data_preparation.preferences import get_preferences
+from mage_ai.server.logger import Logger
 from mage_ai.shared.path_fixer import remove_base_repo_path
 from mage_ai.shared.strings import capitalize_remove_underscore_lower
+
+logger = Logger().new_server_logger(__name__)
 
 
 def build_file_object(obj):
@@ -53,7 +59,7 @@ class GitBranchResource(GenericResource):
             if remote_url:
                 provider = get_provider_from_remote_url(remote_url)
 
-            access_token = api.get_access_token_for_user(user, provider=provider)
+            access_token = get_oauth_access_token_for_user(user, provider=provider)
             if access_token:
                 branches = GitClient.get_client_for_provider(provider)(
                     access_token.token
@@ -64,7 +70,15 @@ class GitBranchResource(GenericResource):
             arr += [dict(name=branch) for branch in git_manager.branches]
 
             if include_remote_branches:
-                pass
+                try:
+                    git_manager.fetch()
+                    mage_remote = git_manager.origin
+                    arr += [
+                        dict(name=ref.name)
+                        for ref in mage_remote.refs
+                    ]
+                except Exception:
+                    logger.warning('Failed to fetch remote branches')
 
         return self.build_result_set(
             arr,
@@ -123,6 +137,48 @@ class GitBranchResource(GenericResource):
             **kwargs,
         )
 
+    @classmethod
+    def get_oauth_config(
+        cls,
+        remote_url: str = None,
+        remote_name: str = None,
+        user=None,
+    ) -> Tuple[str, str, str, Dict]:
+        git_manager = cls.get_git_manager(user=user)
+        url = None
+        if remote_url:
+            url = remote_url
+        elif remote_name:
+            remote = git_manager.repo.remotes[remote_name]
+            url = list(remote.urls)[0]
+
+        provider = ProviderName.GITHUB
+        if url:
+            provider = get_provider_from_remote_url(url)
+
+        access_token = get_oauth_access_token_for_user(
+            user, provider=provider
+        )
+        http_access_token = git_manager.get_access_token()
+
+        config_overwrite = None
+        token = None
+        if access_token:
+            token = access_token.token
+            user_from_api = api.get_user(token, provider=provider)
+            # Default to mage user email if no email is returned from API
+            email = user_from_api.get(
+                'email', user.email if user else None
+            )
+            config_overwrite = dict(
+                username=user_from_api.get('username'),
+                email=email,
+            )
+        elif http_access_token:
+            token = http_access_token
+
+        return token, provider, url, config_overwrite
+
     async def update(self, payload, **kwargs):
         query = kwargs.get('query') or {}
 
@@ -135,40 +191,15 @@ class GitBranchResource(GenericResource):
         files = payload.get('files', None)
         message = payload.get('message', None)
 
-        url = None
         remote_url = query.get('remote_url', None)
         if remote_url:
-            url = remote_url[0]
-        elif action_remote:
-            remote = git_manager.repo.remotes[action_remote]
-            url = list(remote.urls)[0]
+            remote_url = remote_url[0]
 
-        provider = ProviderName.GITHUB
-        if url:
-            provider = get_provider_from_remote_url(url)
-
-        access_token = api.get_access_token_for_user(
-            self.current_user, provider=provider
+        token, provider, url, config_overwrite = self.get_oauth_config(
+            remote_url=remote_url,
+            remote_name=action_remote,
+            user=self.current_user,
         )
-        http_access_token = git_manager.get_access_token()
-
-        token = None
-        if access_token:
-            token = access_token.token
-        elif http_access_token:
-            token = http_access_token
-
-        config_overwrite = None
-        if token:
-            user_from_api = api.get_user(token, provider=provider)
-            # Default to mage user email if no email is returned from API
-            email = user_from_api.get(
-                'email', self.current_user.email if self.current_user else None
-            )
-            config_overwrite = dict(
-                username=user_from_api.get('username'),
-                email=email,
-            )
 
         # Recreate git manager with updated config
         git_manager = self.get_git_manager(

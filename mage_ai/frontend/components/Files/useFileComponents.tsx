@@ -33,6 +33,7 @@ import dark from '@oracle/styles/themes/dark';
 import useContextMenu from '@utils/useContextMenu';
 import useDelayFetch from '@api/utils/useDelayFetch';
 import useStatus from '@utils/models/status/useStatus';
+import { ApplicationExpansionUUIDEnum } from '@interfaces/CommandCenterType';
 import {
   Check,
   Circle,
@@ -315,6 +316,10 @@ function useFileComponents({
       && (typeof window === 'undefined'
         || !window.confirm(`${filePath} has unsaved changes, are you sure you want to close this file?`)));
 
+    if (fps?.length > 0) {
+      return;
+    }
+
     const indexes = filePaths?.map((filePath) => openFilePaths?.findIndex((fp: string) => fp === filePath));
     indexes.sort();
     let idx = indexes?.find((index, i) => i >= 1 && index > indexes[i - 1] + 1);
@@ -354,9 +359,11 @@ function useFileComponents({
     }
   }, [
     filesTouched,
-    selectedFilePath,
+    openFilePaths,
     setContentByFilePath,
+    setFilesTouched,
     setOpenFilePaths,
+    setSelectedFilePath,
     status,
   ]);
 
@@ -455,6 +462,7 @@ function useFileComponents({
     exclude_dir_pattern: COMMON_EXCLUDE_DIR_PATTERNS,
   }, {
     delay: (typeof delayFetch === 'undefined' || delayFetch === null) ? 0 : delayFetch,
+    pauseFetch: uuidProp !== ApplicationExpansionUUIDEnum.ArcaneLibrary,
   });
   const filesFlatten = useMemo(() => filesFlattenData?.files  || [], [filesFlattenData]);
 
@@ -648,12 +656,17 @@ function useFileComponents({
     <FileBrowser
       {...fileBrowserProps}
       files={filteredFiles}
-      onClickFile={(path: string, _: FileType) => openFile(path)}
+      onClickFile={(!onOpenFile && onSelectBlockFile)
+        ? null
+        : (path: string, _: FileType) => openFile(path)
+      }
       onClickFolder={(path: string, _: FileType) => openFile(path, true)}
     />
   ), [
     fileBrowserProps,
     filteredFiles,
+    onOpenFile,
+    onSelectBlockFile,
     openFile,
   ]);
 

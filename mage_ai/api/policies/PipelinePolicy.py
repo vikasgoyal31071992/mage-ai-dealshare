@@ -85,9 +85,11 @@ PipelinePolicy.allow_write([
     'conditionals',
     'clone_pipeline_uuid',
     'custom_template_uuid',
+    'description',
     'extensions',
     'llm',
     'name',
+    'tags',
     'type',
 ], scopes=[
     OauthScope.CLIENT_PRIVATE,
@@ -148,6 +150,7 @@ PipelinePolicy.allow_query(
 PipelinePolicy.allow_query([
     'from_history_days',
     'include_schedules',
+    'repo_path',
     'search',
     'status[]',
     'tag[]',

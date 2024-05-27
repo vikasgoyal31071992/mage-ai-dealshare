@@ -25,6 +25,7 @@ logger = Logger().new_server_logger(__name__)
 
 
 def run_scheduler():
+    from mage_ai.orchestration.job_manager import job_manager
     from mage_ai.orchestration.triggers.loop_time_trigger import LoopTimeTrigger
 
     sentry_dsn = SENTRY_DSN
@@ -47,8 +48,12 @@ def run_scheduler():
     )
 
     try:
+        if job_manager is not None:
+            job_manager.start()
         LoopTimeTrigger().start()
     except Exception as e:
+        if job_manager is not None:
+            job_manager.stop()
         logger.exception('Failed to run scheduler.')
         raise e
 
@@ -93,9 +98,13 @@ class SchedulerManager:
                 time.sleep(SCHEDULER_AUTO_RESTART_INTERVAL / 1000)
 
     def stop_scheduler(self):
+        from mage_ai.orchestration.job_manager import job_manager
+
         logger.info('Stop scheduler.')
         if self.is_alive:
             self.scheduler_process.terminate()
+            if job_manager is not None:
+                job_manager.stop()
             self.scheduler_process = None
             self.status = self.SchedulerStatus.STOPPED
 

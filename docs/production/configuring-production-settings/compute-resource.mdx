@@ -205,11 +205,11 @@ name: example_pipeline
 
 #### Extra fields
 
-| Field name              | Description                                                                                                                   | Example values              |
-| ----------------------- | ----------------------------------------------------------------------------------------------------------------------------- | --------------------------- |
-| assign_public_ip        | Whether to assign public IP to the ECS task.                                                                                  | true/false (default: true)  |
-| enable_execute_command  | Whether to [enable execute command for debugging](https://docs.aws.amazon.com/AmazonECS/latest/developerguide/ecs-exec.html)  | true/false (default: false) |
-| wait_timeout            | The maximum wait time for the ECS task (in seoncds). The default wait timeout for the ECS task is 10 minutes.                 | 1200 (default: 600)         |
+| Field name              | Description                                                                                                                                            | Example values              |
+| ----------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------ | --------------------------- |
+| assign_public_ip        | Whether to assign public IP to the ECS task.                                                                                                           | true/false (default: true)  |
+| enable_execute_command  | Whether to [enable execute command for debugging](https://docs.aws.amazon.com/AmazonECS/latest/developerguide/ecs-exec.html)                           | true/false (default: false) |
+| wait_timeout            | The maximum wait time for the ECS task (in seoncds). The default wait timeout for the ECS task is 10 minutes. Setting to -1 will disable waiting. | 1200 (default: 600)         |
 
 Example config
 ```yaml
@@ -234,7 +234,7 @@ Required IAM permissions for using ECS executor:
 
 ### GCP Cloud Run executor
 
-If your Mage app is deployed on GCP, you can choose to launch separate GCP Cloud Run jobs to execute blocks.
+If your Mage app is deployed on GCP Cloud Run, you can choose to launch separate GCP Cloud Run jobs to execute blocks.
 
 How to configure pipeline to use GCP cloud run executor:
 1. Update Project's metadata.yaml
