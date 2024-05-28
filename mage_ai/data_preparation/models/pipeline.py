@@ -15,8 +15,10 @@ import yaml
 from jinja2 import Template
 
 from mage_ai.authentication.permissions.constants import EntityName
+from mage_ai.cache.block import BlockCache
 from mage_ai.cache.pipeline import PipelineCache
 from mage_ai.data_preparation.models.block import Block, run_blocks, run_blocks_sync
+from mage_ai.data_preparation.models.block.block_factory import BlockFactory
 from mage_ai.data_preparation.models.block.data_integration.utils import (
     convert_outputs_to_data,
 )
@@ -82,6 +84,8 @@ class Pipeline:
         repo_config=None,
         catalog=None,
         use_repo_path: bool = False,
+        description: str = None,
+        tags: List[str] = None,
     ):
         self.block_configs = []
         self.blocks_by_uuid = {}
@@ -90,7 +94,7 @@ class Pipeline:
         self.concurrency_config = dict()
         self.created_at = None
         self.data_integration = None
-        self.description = None
+        self.description = description
         self.executor_config = dict()
         self.executor_type = None
         self.extensions = {}
@@ -101,7 +105,7 @@ class Pipeline:
         self.run_pipeline_in_one_process = False
         self.schedules = []
         self.settings = {}
-        self.tags = []
+        self.tags = tags or []
         self.type = PipelineType.PYTHON
         self.use_repo_path = use_repo_path
         self.uuid = uuid
@@ -215,7 +219,14 @@ class Pipeline:
             self.widget_configs
 
     @classmethod
-    def create(self, name, pipeline_type=PipelineType.PYTHON, repo_path=None):
+    def create(
+        self,
+        name: str,
+        description: str = None,
+        pipeline_type: PipelineType = PipelineType.PYTHON,
+        repo_path: str = None,
+        tags: List[str] = None,
+    ):
         """
         1. Create a new folder for pipeline
         2. Create a new yaml file to store pipeline config
@@ -231,14 +242,20 @@ class Pipeline:
         with open(os.path.join(pipeline_path, PIPELINE_CONFIG_FILE), 'w') as fp:
             yaml.dump(dict(
                 created_at=str(datetime.now(tz=pytz.UTC)),
+                description=description,
                 name=name,
+                tags=tags or [],
                 uuid=uuid,
                 type=format_enum(pipeline_type or PipelineType.PYTHON),
             ), fp)
+
         pipeline = Pipeline(
             uuid,
+            description=description,
             repo_path=repo_path,
+            tags=tags or [],
         )
+
         return pipeline
 
     @classmethod
@@ -368,6 +385,54 @@ class Pipeline:
             IntegrationPipeline,
         )
 
+        config_path, repo_path = self._get_config_path(
+            uuid,
+            repo_path=repo_path,
+            all_projects=all_projects,
+            use_repo_path=use_repo_path,
+        )
+
+        if check_if_exists and not os.path.exists(config_path):
+            return None
+
+        pipeline = self(uuid, repo_path=repo_path, use_repo_path=use_repo_path)
+        if PipelineType.INTEGRATION == pipeline.type:
+            pipeline = IntegrationPipeline(uuid, repo_path=repo_path)
+
+        return pipeline
+
+    @classmethod
+    def get_config(
+        self,
+        uuid,
+        repo_path: str = None,
+        all_projects: bool = False,
+        use_repo_path: bool = False,
+    ):
+        config_path, _ = self._get_config_path(
+            uuid,
+            repo_path=repo_path,
+            all_projects=all_projects,
+            use_repo_path=use_repo_path,
+        )
+
+        metadata_path = os.path.join(config_path, PIPELINE_CONFIG_FILE)
+
+        if not os.path.exists(metadata_path):
+            return None
+
+        with open(metadata_path) as fp:
+            config = yaml.full_load(fp) or {}
+        return config
+
+    @classmethod
+    def _get_config_path(
+        self,
+        uuid,
+        repo_path: str = None,
+        all_projects: bool = False,
+        use_repo_path: bool = False,
+    ) -> Tuple[str, str]:
         if all_projects and not use_repo_path and project_platform_activated():
             from mage_ai.settings.platform.utils import get_pipeline_config_path
 
@@ -379,15 +444,7 @@ class Pipeline:
                 PIPELINES_FOLDER,
                 uuid,
             )
-
-        if check_if_exists and not os.path.exists(config_path):
-            return None
-
-        pipeline = self(uuid, repo_path=repo_path, use_repo_path=use_repo_path)
-        if PipelineType.INTEGRATION == pipeline.type:
-            pipeline = IntegrationPipeline(uuid, repo_path=repo_path)
-
-        return pipeline
+        return config_path, repo_path
 
     @classmethod
     async def load_metadata(
@@ -717,7 +774,8 @@ class Pipeline:
                 )
 
             language = c.get('language')
-            return Block.block_class_from_type(block_type, language=language, pipeline=self)(
+
+            return BlockFactory.block_class_from_type(block_type, language=language, pipeline=self)(
                 c.get('name'),
                 c.get('uuid'),
                 block_type,
@@ -931,6 +989,8 @@ class Pipeline:
             include_outputs=include_outputs,
             sample_count=sample_count,
         )
+        if include_block_pipelines:
+            shared_kwargs['block_cache'] = BlockCache()
         blocks_data = await asyncio.gather(
             *[b.to_dict_async(**merge_dict(shared_kwargs, dict(
                 include_block_catalog=include_block_catalog,
@@ -991,6 +1051,7 @@ class Pipeline:
         old_uuid = None
         blocks_to_remove_from_cache = []
         block_uuids_to_add_to_cache = []
+        tags_to_remove_from_cache = []
         should_update_block_cache = False
         should_update_tag_cache = False
 
@@ -1043,6 +1104,10 @@ class Pipeline:
             old_tags = self.tags or []
 
             if sorted(new_tags) != sorted(old_tags):
+                tags_diff = set(old_tags).symmetric_difference(set(new_tags))
+                for tag in tags_diff:
+                    if tag in old_tags:
+                        tags_to_remove_from_cache.append(tag)
                 self.tags = new_tags
                 should_save = True
                 should_update_tag_cache = True
@@ -1296,6 +1361,8 @@ class Pipeline:
 
             cache = await TagCache.initialize_cache()
 
+            for tag_uuid in tags_to_remove_from_cache:
+                cache.remove_pipeline(tag_uuid, self.uuid, self.repo_path)
             for tag_uuid in self.tags:
                 if old_uuid:
                     cache.remove_pipeline(tag_uuid, old_uuid, self.repo_path)
