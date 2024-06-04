@@ -89,6 +89,7 @@ from mage_ai.services.ssh.aws.emr.utils import file_path as file_path_aws_emr
 from mage_ai.settings import (
     AUTHENTICATION_MODE,
     DISABLE_AUTO_BROWSER_OPEN,
+    DISABLE_AUTORELOAD,
     ENABLE_PROMETHEUS,
     OAUTH2_APPLICATION_CLIENT_ID,
     OTEL_EXPORTER_OTLP_ENDPOINT,
@@ -114,9 +115,10 @@ from mage_ai.settings.repo import (
     set_repo_path,
 )
 from mage_ai.shared.constants import ENV_VAR_INSTANCE_TYPE, InstanceType
-from mage_ai.shared.environments import is_debug
+from mage_ai.shared.environments import is_debug, is_dev
 from mage_ai.shared.io import chmod
 from mage_ai.shared.logger import LoggingLevel, set_logging_format
+from mage_ai.shared.singletons.memory import get_memory_manager_controller
 from mage_ai.shared.utils import is_port_in_use
 from mage_ai.usage_statistics.logger import UsageStatisticLogger
 
@@ -311,7 +313,6 @@ def make_app(
             r'/api/pipelines/(?P<pipeline_uuid>\w+)/blocks/(?P<block_uuid>[\w\-\%2f\.]+)/analyses',
             ApiPipelineBlockAnalysisHandler,
         ),
-
         # Trigger pipeline via API
         # Original route for backwards compatibility
         (
@@ -322,7 +323,6 @@ def make_app(
             r'/api/pipeline_schedules/(?P<pipeline_schedule_id>\w+)/api_trigger',
             ApiTriggerPipelineHandler,
         ),
-
         # Run a single block and get a response immediately
         (
             r'/api/runs',
@@ -332,7 +332,6 @@ def make_app(
             r'/api/runs/(?P<token>\w+)',
             ApiRunHandler,
         ),
-
         # Download block output
         (
             r'/api/pipelines/(?P<pipeline_uuid>\w+)/block_outputs/'
@@ -340,12 +339,9 @@ def make_app(
             ApiDownloadHandler,
         ),
         # Download resource
+        (r'/api/downloads/(?P<token>[\w/%.-]+)', ApiResourceDownloadHandler),
         (
-            r'/api/downloads/(?P<token>[\w/%.-]+)',
-            ApiResourceDownloadHandler
-        ),
-        (
-            r'/api/(?P<resource>\w+)/(?P<pk>[\w\-\%2f\.]+)' \
+            r'/api/(?P<resource>\w+)/(?P<pk>[\w\-\%2f\.]+)'
             r'/(?P<child>\w+)/(?P<child_pk>[\w\-\%2f\.]+)',
             ApiChildDetailHandler,
         ),
@@ -376,6 +372,7 @@ def make_app(
 
     if ENABLE_PROMETHEUS or OTEL_EXPORTER_OTLP_ENDPOINT:
         from opentelemetry.instrumentation.tornado import TornadoInstrumentor
+
         TornadoInstrumentor().instrument()
         logger.info('OpenTelemetry instrumentation enabled.')
 
@@ -390,10 +387,12 @@ def make_app(
         from opentelemetry.sdk.trace import TracerProvider
         from opentelemetry.sdk.trace.export import BatchSpanProcessor
 
-        service_name = "mage-ai-server"
-        resource = Resource(attributes={
-            "service.name": service_name,
-        })
+        service_name = 'mage-ai-server'
+        resource = Resource(
+            attributes={
+                'service.name': service_name,
+            }
+        )
 
         # Set up a TracerProvider and attach an OTLP exporter to it
         trace.set_tracer_provider(TracerProvider(resource=resource))
@@ -404,7 +403,7 @@ def make_app(
             # Endpoint of your OpenTelemetry Collector
             endpoint=OTEL_EXPORTER_OTLP_ENDPOINT,
             # Use insecure channel if your collector does not support TLS
-            insecure=True
+            insecure=True,
         )
 
         # Attach the OTLP exporter to the TracerProvider
@@ -420,9 +419,7 @@ def make_app(
 
         TornadoInstrumentor().instrument()
         # Service name is required for most backends
-        resource = Resource(attributes={
-            SERVICE_NAME: 'mage'
-        })
+        resource = Resource(attributes={SERVICE_NAME: 'mage'})
 
         # Initialize PrometheusMetricReader which pulls metrics from the SDK
         # on-demand to respond to scrape requests
@@ -434,12 +431,9 @@ def make_app(
     if update_routes:
         updated_routes = []
         for route in routes:
-            updated_routes.append(
-                (route[0].replace('/', f'/{ROUTES_BASE_PATH}/', 1), *route[1:]))
+            updated_routes.append((route[0].replace('/', f'/{ROUTES_BASE_PATH}/', 1), *route[1:]))
     else:
         updated_routes = routes
-
-    autoreload.add_reload_hook(scheduler_manager.stop_scheduler)
 
     file_path = file_path_aws_emr()
     if not os.path.exists(file_path):
@@ -447,11 +441,16 @@ def make_app(
         with open(file_path, 'w') as f:
             f.write(json.dumps({}))
 
-    autoreload.watch(file_path)
+    if is_dev() and not DISABLE_AUTORELOAD:
+        should_autoreload = True
+        autoreload.add_reload_hook(scheduler_manager.stop_scheduler)
+        autoreload.watch(file_path)
+    else:
+        should_autoreload = False
 
     return tornado.web.Application(
         updated_routes,
-        autoreload=True,
+        autoreload=should_autoreload,
         template_path=template_dir,
     )
 
@@ -517,8 +516,7 @@ def initialize_user_authentication(project_type: ProjectType) -> Oauth2Applicati
         Oauth2Application.client_id == OAUTH2_APPLICATION_CLIENT_ID,
     ).first()
     if not oauth_client:
-        logger.info(
-            'OAuth2 application doesn’t exist for frontend, creating OAuth2 application.')
+        logger.info('OAuth2 application doesn’t exist for frontend, creating OAuth2 application.')
         oauth_client = Oauth2Application.create(
             client_id=OAUTH2_APPLICATION_CLIENT_ID,
             client_type=Oauth2Application.ClientType.PUBLIC,
@@ -596,6 +594,7 @@ async def main(
         try:
             from mage_ai.data_preparation.sync import GitConfig
             from mage_ai.data_preparation.sync.git_sync import GitSync
+
             sync_config = GitConfig.load(config=preferences.sync_config)
             sync = GitSync(sync_config, setup_repo=True)
             if sync_config.remote_repo_link and sync_config.sync_on_start is True:
@@ -638,9 +637,9 @@ async def main(
         await BlockActionObjectCache.initialize_cache(project=project_model, replace=True)
 
         if project_model:
-            if project_model.spark_config and \
-                    project_model.is_feature_enabled(FeatureUUID.COMPUTE_MANAGEMENT):
-
+            if project_model.spark_config and project_model.is_feature_enabled(
+                FeatureUUID.COMPUTE_MANAGEMENT
+            ):
                 Application.clear_cache()
 
             if project_model.is_feature_enabled(FeatureUUID.DBT_V2):
@@ -695,6 +694,8 @@ async def main(
             SCHEDULER_AUTO_RESTART_INTERVAL,
         )
         periodic_callback.start()
+
+    get_memory_manager_controller().events
 
     update_settings_on_metadata_change()
     observer = Observer()

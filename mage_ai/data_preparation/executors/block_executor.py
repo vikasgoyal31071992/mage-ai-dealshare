@@ -2,7 +2,7 @@ import asyncio
 import json
 import traceback
 from datetime import datetime, timedelta
-from typing import Callable, Dict, List, Union
+from typing import Callable, Dict, List, Optional, Union
 
 import pytz
 import requests
@@ -22,7 +22,8 @@ from mage_ai.data_preparation.models.block.data_integration.utils import (
     source_module_file_path,
 )
 from mage_ai.data_preparation.models.block.dynamic.child import DynamicChildController
-from mage_ai.data_preparation.models.block.dynamic.utils import (
+from mage_ai.data_preparation.models.block.dynamic.factory import DynamicBlockFactory
+from mage_ai.data_preparation.models.block.dynamic.shared import (
     is_dynamic_block,
     is_dynamic_block_child,
     should_reduce_output,
@@ -58,8 +59,8 @@ class BlockExecutor:
         self,
         pipeline,
         block_uuid,
-        execution_partition: str = None,
-        block_run_id: int = None,
+        execution_partition: Optional[str] = None,
+        block_run_id: Optional[int] = None,
     ):
         """
         Initialize the BlockExecutor.
@@ -84,21 +85,22 @@ class BlockExecutor:
         self.retry_metadata = dict(attempts=0)
 
         self.block = self.pipeline.get_block(self.block_uuid, check_template=True)
-
-        if self.block and \
-                is_dynamic_block_child(self.block) and \
-                (
-                    self.block.uuid == block_uuid or (
-                        self.block.replicated_block and self.block.uuid_replicated == block_uuid
-                    )
-                ):
-
-            self.block = DynamicChildController(
-                self.block,
-                block_run_id=block_run_id,
-            )
-
         self.block_run = None
+
+        # Ensure the original block run is wrapped only, not the clones.
+        if self.block is not None and self.block.is_original_block(block_uuid):
+            if self.block.is_dynamic_child_streaming:
+                self.block = DynamicBlockFactory(
+                    self.block,
+                    block_run_id=block_run_id,
+                    execution_partition=execution_partition,
+                    logger=self.logger,
+                )
+            elif is_dynamic_block_child(self.block):
+                self.block = DynamicChildController(
+                    self.block,
+                    block_run_id=block_run_id,
+                )
 
     def execute(
         self,
@@ -153,9 +155,12 @@ class BlockExecutor:
             global_vars = {}
         block_run = None
 
-        if Project.is_feature_enabled_in_root_or_active_project(
-            FeatureUUID.GLOBAL_HOOKS,
-        ) and not self.block:
+        if (
+            Project.is_feature_enabled_in_root_or_active_project(
+                FeatureUUID.GLOBAL_HOOKS,
+            )
+            and not self.block
+        ):
             block_run = BlockRun.query.get(block_run_id) if block_run_id else None
             self.block_run = block_run
             if block_run and block_run.metrics and block_run.metrics.get('hook'):
@@ -183,9 +188,7 @@ class BlockExecutor:
             result = dict()
 
             tags = self.build_tags(
-                block_run_id=block_run_id,
-                pipeline_run_id=pipeline_run_id,
-                **kwargs
+                block_run_id=block_run_id, pipeline_run_id=pipeline_run_id, **kwargs
             )
 
             self.logger.logging_tags = tags
@@ -252,12 +255,14 @@ class BlockExecutor:
                     end_date = (execution_date).isoformat()
                     start_date = (execution_date - date_diff).isoformat()
 
-                runtime_arguments.update(dict(
-                    _end_date=end_date,
-                    _execution_date=execution_date.isoformat(),
-                    _execution_partition=pipeline_run.execution_partition,
-                    _start_date=start_date,
-                ))
+                runtime_arguments.update(
+                    dict(
+                        _end_date=end_date,
+                        _execution_date=execution_date.isoformat(),
+                        _execution_partition=pipeline_run.execution_partition,
+                        _start_date=start_date,
+                    )
+                )
 
             if block_run and block_run.metrics and is_data_integration:
                 data_integration_metadata = block_run.metrics
@@ -283,8 +288,9 @@ class BlockExecutor:
                         'parent_stream',
                     ]:
                         if key in data_integration_metadata:
-                            self.block.template_runtime_configuration[key] = \
+                            self.block.template_runtime_configuration[key] = (
                                 data_integration_metadata.get(key)
+                            )
 
             if not is_data_integration_controller or is_data_integration_child:
                 self.logger.info(f'Start executing block with {self.__class__.__name__}.', **tags)
@@ -298,7 +304,8 @@ class BlockExecutor:
                 # This is used when there are 2 or more upstream dynamic blocks or dynamic childs.
                 dynamic_block_indexes = block_run_data.get('dynamic_block_indexes', None)
                 dynamic_upstream_block_uuids = block_run_data.get(
-                    'dynamic_upstream_block_uuids', None)
+                    'dynamic_upstream_block_uuids', None
+                )
 
             # 2023/12/12 (tommy dang): this doesn’t seem to be used anymore because the
             # fetching the reduce output from upstream dynamic child blocks is handled in
@@ -328,11 +335,12 @@ class BlockExecutor:
                     # We currently limit a block to only have 1 direct dynamic parent.
                     # We are looping over the upstream blocks just in case we support having
                     # multiple direct dynamic parents.
-                    for block_grandparent in list(filter(
-                        lambda x: is_dynamic_block(x),
-                        upstream_block.upstream_blocks,
-                    )):
-
+                    for block_grandparent in list(
+                        filter(
+                            lambda x: is_dynamic_block(x),
+                            upstream_block.upstream_blocks,
+                        )
+                    ):
                         block_grandparent_uuid = block_grandparent.uuid
 
                         if suffix and is_dynamic_block_child(block_grandparent):
@@ -356,15 +364,23 @@ class BlockExecutor:
                                     metadata,
                                     idx,
                                     upstream_block_uuid=block_grandparent_uuid,
-                                ))
+                                )
+                            )
 
-                dynamic_upstream_block_uuids = dynamic_upstream_block_uuids_reduce + \
-                    dynamic_upstream_block_uuids_no_reduce
+                dynamic_upstream_block_uuids = (
+                    dynamic_upstream_block_uuids_reduce + dynamic_upstream_block_uuids_no_reduce
+                )
 
             should_run_conditional = True
 
             if is_dynamic_block_child(self.block):
-                if self.block_run and self.block_run.block_uuid == self.block.uuid:
+                if self.block_run and (
+                    self.block_run.block_uuid == self.block.uuid
+                    or (
+                        self.block.replicated_block
+                        and self.block_run.block_uuid == self.block.uuid_replicated
+                    )
+                ):
                     should_run_conditional = False
 
             if should_run_conditional:
@@ -382,10 +398,13 @@ class BlockExecutor:
                 self.logger.info(
                     f'Conditional block(s) returned false for {self.block.uuid}. '
                     'This block run and downstream blocks will be set as CONDITION_FAILED.',
-                    **merge_dict(tags, dict(
-                        block_type=self.block.type,
-                        block_uuid=self.block.uuid,
-                    )),
+                    **merge_dict(
+                        tags,
+                        dict(
+                            block_type=self.block.type,
+                            block_uuid=self.block.uuid,
+                        ),
+                    ),
                 )
 
                 if is_data_integration:
@@ -459,16 +478,20 @@ class BlockExecutor:
                     self.logger.info(
                         'All child block runs completed, updating controller block run '
                         f'for block {controller_block_uuid} to complete.',
-                        **merge_dict(tags, dict(
-                            block_uuid=self.block.uuid,
-                            controller_block_uuid=controller_block_uuid,
-                        )),
+                        **merge_dict(
+                            tags,
+                            dict(
+                                block_uuid=self.block.uuid,
+                                controller_block_uuid=controller_block_uuid,
+                            ),
+                        ),
                     )
                 should_execute = False
-            elif is_data_integration_controller and \
-                    is_data_integration_child and not \
-                    run_in_parallel:
-
+            elif (
+                is_data_integration_controller
+                and is_data_integration_child
+                and not run_in_parallel
+            ):
                 children = []
                 status_count = {}
                 block_run_dicts_mapping = {}
@@ -493,10 +516,14 @@ class BlockExecutor:
                 # Only update the child controller (for a specific stream) to complete
                 # if all its child block runs are complete (only for source).
                 children_length = len(children)
-                should_finish = children_length >= 1 and status_count.get(
-                    BlockRun.BlockRunStatus.COMPLETED.value,
-                    0,
-                ) >= children_length
+                should_finish = (
+                    children_length >= 1
+                    and status_count.get(
+                        BlockRun.BlockRunStatus.COMPLETED.value,
+                        0,
+                    )
+                    >= children_length
+                )
 
                 if upstream_block_uuids:
                     statuses_completed = []
@@ -504,7 +531,8 @@ class BlockExecutor:
                         block_run_dict = block_run_dicts_mapping.get(up_block_uuid)
                         if block_run_dict:
                             statuses_completed.append(
-                                BlockRun.BlockRunStatus.COMPLETED.value == block_run_dict.get(
+                                BlockRun.BlockRunStatus.COMPLETED.value
+                                == block_run_dict.get(
                                     'status',
                                 ),
                             )
@@ -530,26 +558,31 @@ class BlockExecutor:
                             continue
 
                         # Same controller
-                        if controller_block_uuid == metrics.get('controller_block_uuid') and \
-                                index - 1 == int(metrics.get('index') or 0):
-
+                        if controller_block_uuid == metrics.get(
+                            'controller_block_uuid'
+                        ) and index - 1 == int(metrics.get('index') or 0):
                             block_run_dict_previous = block_run_dict
 
                     if block_run_dict_previous:
-                        should_execute = BlockRun.BlockRunStatus.COMPLETED.value == \
-                            block_run_dict_previous.get('status')
+                        should_execute = (
+                            BlockRun.BlockRunStatus.COMPLETED.value
+                            == block_run_dict_previous.get('status')
+                        )
 
                         if not should_execute:
                             stream = data_integration_metadata.get('stream')
                             self.logger.info(
                                 f'Block run ({block_run_id}) {self.block_uuid} for stream {stream} '
                                 f'and batch {index} is waiting for batch {index - 1} to complete.',
-                                **merge_dict(tags, dict(
-                                    batch=index - 1,
-                                    block_uuid=self.block.uuid,
-                                    controller_block_uuid=controller_block_uuid,
-                                    index=index,
-                                )),
+                                **merge_dict(
+                                    tags,
+                                    dict(
+                                        batch=index - 1,
+                                        block_uuid=self.block.uuid,
+                                        controller_block_uuid=controller_block_uuid,
+                                        index=index,
+                                    ),
+                                ),
                             )
 
                             return
@@ -601,7 +634,8 @@ class BlockExecutor:
                             template_runtime_configuration=template_runtime_configuration,
                             dynamic_block_index=dynamic_block_index,
                             dynamic_block_indexes=dynamic_block_indexes,
-                            dynamic_block_uuid=None if dynamic_block_index is None
+                            dynamic_block_uuid=None
+                            if dynamic_block_index is None
                             else block_run.block_uuid,
                             dynamic_upstream_block_uuids=dynamic_upstream_block_uuids,
                             data_integration_metadata=data_integration_metadata,
@@ -614,9 +648,12 @@ class BlockExecutor:
                 except Exception as error:
                     self.logger.exception(
                         f'Failed to execute block {self.block.uuid}',
-                        **merge_dict(tags, dict(
-                            error=error,
-                        )),
+                        **merge_dict(
+                            tags,
+                            dict(
+                                error=error,
+                            ),
+                        ),
                     )
 
                     errors = traceback.format_stack()
@@ -627,15 +664,19 @@ class BlockExecutor:
                     )
 
                     if not skip_logging:
-                        asyncio.run(UsageStatisticLogger().error(
-                            event_name=EventNameType.BLOCK_RUN_ERROR,
-                            errors='\n'.join(errors or []),
-                            message=str(error),
-                            resource=EventObjectType.BLOCK_RUN,
-                            resource_id=self.block_uuid,
-                            resource_parent=EventObjectType.PIPELINE if self.pipeline else None,
-                            resource_parent_id=self.pipeline.uuid if self.pipeline else None,
-                        ))
+                        asyncio.run(
+                            UsageStatisticLogger().error(
+                                event_name=EventNameType.BLOCK_RUN_ERROR,
+                                errors='\n'.join(errors or []),
+                                message=str(error),
+                                resource=EventObjectType.BLOCK_RUN,
+                                resource_id=self.block_uuid,
+                                resource_parent=EventObjectType.PIPELINE
+                                if self.pipeline
+                                else None,
+                                resource_parent_id=self.pipeline.uuid if self.pipeline else None,
+                            )
+                        )
 
                     if on_failure is not None:
                         on_failure(
@@ -665,8 +706,9 @@ class BlockExecutor:
                     raise error
 
             if not should_finish:
-                should_finish = not is_data_integration_controller or \
-                    (is_data_integration_child and run_in_parallel)
+                should_finish = not is_data_integration_controller or (
+                    is_data_integration_child and run_in_parallel
+                )
 
             # Destination must complete immediately or else it’ll keep trying to
             # convert its upstream blocks’ (that aren’t sources) data to Singer Spec output.
@@ -674,9 +716,14 @@ class BlockExecutor:
             # If this child controller continues to convert the data while the child block run
             # is ingesting the data, there will be a mismatch of records.
             if not should_finish:
-                should_finish = is_data_integration_controller and \
-                    is_data_integration_child and \
-                    self.block.is_destination()
+                should_finish = (
+                    is_data_integration_controller
+                    and is_data_integration_child
+                    and self.block.is_destination()
+                )
+
+            if isinstance(self.block, DynamicBlockFactory):
+                should_finish = self.block.is_complete()
 
             if should_finish:
                 self.logger.info(f'Finish executing block with {self.__class__.__name__}.', **tags)
@@ -711,6 +758,11 @@ class BlockExecutor:
                     logging_tags=tags,
                     pipeline_run=pipeline_run,
                 )
+
+            from mage_ai.settings.server import VARIABLE_DATA_OUTPUT_META_CACHE
+
+            if VARIABLE_DATA_OUTPUT_META_CACHE:
+                self.block.aggregate_summary_info(execution_partition=self.execution_partition)
 
             return result
         finally:
@@ -808,16 +860,18 @@ class BlockExecutor:
                         # This is required or else loading the module within the block execute
                         # method will create very large log files that compound. Not sure why,
                         # so this is the temp fix.
-                        data_integration_uuid = \
-                            data_integration_settings.get('data_integration_uuid')
+                        data_integration_uuid = data_integration_settings.get(
+                            'data_integration_uuid'
+                        )
 
                         if data_integration_uuid:
                             if 'data_integration_runtime_settings' not in extra_options:
                                 extra_options['data_integration_runtime_settings'] = {}
 
-                            if 'module_file_paths' not in \
-                                    extra_options['data_integration_runtime_settings']:
-
+                            if (
+                                'module_file_paths'
+                                not in extra_options['data_integration_runtime_settings']
+                            ):
                                 extra_options['data_integration_runtime_settings'][
                                     'module_file_paths'
                                 ] = dict(
@@ -832,11 +886,12 @@ class BlockExecutor:
                                 key = 'destinations'
                                 file_path_func = destination_module_file_path
 
-                            if data_integration_uuid not in \
-                                    extra_options['data_integration_runtime_settings'][
-                                        'module_file_paths'
-                                    ][key]:
-
+                            if (
+                                data_integration_uuid
+                                not in extra_options['data_integration_runtime_settings'][
+                                    'module_file_paths'
+                                ][key]
+                            ):
                                 extra_options['data_integration_runtime_settings'][
                                     'module_file_paths'
                                 ][key][data_integration_uuid] = file_path_func(
@@ -862,11 +917,12 @@ class BlockExecutor:
                 if execution_partition_previous:
                     extra_options['execution_partition_previous'] = execution_partition_previous
 
-            if di_settings and \
-                    data_integration_metadata and \
-                    data_integration_metadata.get('controller') and \
-                    data_integration_metadata.get('original_block_uuid'):
-
+            if (
+                di_settings
+                and data_integration_metadata
+                and data_integration_metadata.get('controller')
+                and data_integration_metadata.get('original_block_uuid')
+            ):
                 original_block_uuid = data_integration_metadata.get('original_block_uuid')
 
                 # This is the source/destination controller block run
@@ -902,31 +958,38 @@ class BlockExecutor:
                         for br_metadata in block_run_metadata:
                             index = br_metadata.get('index') or 0
                             number_of_batches = br_metadata.get('number_of_batches') or 0
-                            block_run_block_uuid = \
+                            block_run_block_uuid = (
                                 f'{original_block_uuid}:{data_integration_uuid}:{stream}:{index}'
+                            )
 
                             if block_run_block_uuid not in block_run_block_uuids:
                                 br = pipeline_run.create_block_run(
                                     block_run_block_uuid,
-                                    metrics=merge_dict(dict(
-                                        child=1,
-                                        controller_block_uuid=self.block_uuid,
-                                        is_last_block_run=index == number_of_batches - 1,
-                                        original_block_uuid=original_block_uuid,
-                                        stream=stream,
-                                    ), br_metadata),
+                                    metrics=merge_dict(
+                                        dict(
+                                            child=1,
+                                            controller_block_uuid=self.block_uuid,
+                                            is_last_block_run=index == number_of_batches - 1,
+                                            original_block_uuid=original_block_uuid,
+                                            stream=stream,
+                                        ),
+                                        br_metadata,
+                                    ),
                                 )
 
                                 self.logger.info(
                                     f'Created block run {br.id} for block {br.block_uuid} in batch '
                                     f'index {index} ({index + 1} out of {number_of_batches}).',
-                                    **merge_dict(logging_tags, dict(
-                                        data_integration_uuid=data_integration_uuid,
-                                        index=index,
-                                        number_of_batches=number_of_batches,
-                                        original_block_uuid=original_block_uuid,
-                                        stream=stream,
-                                    )),
+                                    **merge_dict(
+                                        logging_tags,
+                                        dict(
+                                            data_integration_uuid=data_integration_uuid,
+                                            index=index,
+                                            number_of_batches=number_of_batches,
+                                            original_block_uuid=original_block_uuid,
+                                            stream=stream,
+                                        ),
+                                    ),
                                 )
 
                                 arr.append(br)
@@ -955,14 +1018,17 @@ class BlockExecutor:
                             if block_run_block_uuid not in block_run_block_uuids:
                                 return dict(
                                     block_uuid=block_run_block_uuid,
-                                    metrics=merge_dict(dict(
-                                        child=1,
-                                        controller=1,
-                                        controller_block_uuid=controller_block_uuid,
-                                        original_block_uuid=original_block_uuid,
-                                        run_in_parallel=1 if run_in_parallel else 0,
-                                        stream=stream,
-                                    ), metrics or {}),
+                                    metrics=merge_dict(
+                                        dict(
+                                            child=1,
+                                            controller=1,
+                                            controller_block_uuid=controller_block_uuid,
+                                            original_block_uuid=original_block_uuid,
+                                            run_in_parallel=1 if run_in_parallel else 0,
+                                            stream=stream,
+                                        ),
+                                        metrics or {},
+                                    ),
                                 )
 
                         if is_source:
@@ -1005,11 +1071,16 @@ class BlockExecutor:
                                         execution_partition=self.execution_partition,
                                     )
                                     for stream_id in output_file_path_by_stream.keys():
-                                        stream_dict = get_streams_from_catalog(catalog, [stream_id])
+                                        stream_dict = get_streams_from_catalog(
+                                            catalog, [stream_id]
+                                        )
                                         if stream_dict:
-                                            run_in_parallel = stream_dict[0].get(
-                                                'run_in_parallel',
-                                            ) or False
+                                            run_in_parallel = (
+                                                stream_dict[0].get(
+                                                    'run_in_parallel',
+                                                )
+                                                or False
+                                            )
 
                                         block_dict = _build_controller_block_run_dict(
                                             stream_id,
@@ -1023,15 +1094,18 @@ class BlockExecutor:
                                 else:
                                     stream_dict = get_streams_from_catalog(catalog, [up_uuid])
                                     if stream_dict:
-                                        run_in_parallel = stream_dict[0].get(
-                                            'run_in_parallel',
-                                        ) or False
+                                        run_in_parallel = (
+                                            stream_dict[0].get(
+                                                'run_in_parallel',
+                                            )
+                                            or False
+                                        )
 
                                     block_dict = _build_controller_block_run_dict(
                                         up_uuid,
                                         metrics=dict(
                                             run_in_parallel=run_in_parallel,
-                                        )
+                                        ),
                                     )
                                     if block_dict:
                                         block_run_dicts.append(block_dict)
@@ -1063,11 +1137,14 @@ class BlockExecutor:
                             self.logger.info(
                                 f'Created block run {br.id} for block {br.block_uuid} '
                                 f'for stream {stream} {metrics}.',
-                                **merge_dict(logging_tags, dict(
-                                    data_integration_uuid=data_integration_uuid,
-                                    original_block_uuid=original_block_uuid,
-                                    stream=stream,
-                                )),
+                                **merge_dict(
+                                    logging_tags,
+                                    dict(
+                                        data_integration_uuid=data_integration_uuid,
+                                        original_block_uuid=original_block_uuid,
+                                        stream=stream,
+                                    ),
+                                ),
                             )
 
                             arr.append(br)
@@ -1102,8 +1179,9 @@ class BlockExecutor:
                 logging_tags=logging_tags,
                 outputs=result if cache_block_output_in_memory else None,
             )
-        elif PipelineType.INTEGRATION != self.pipeline.type and \
-                (not is_data_integration or BlockLanguage.PYTHON == self.block.language):
+        elif PipelineType.INTEGRATION != self.pipeline.type and (
+            not is_data_integration or BlockLanguage.PYTHON == self.block.language
+        ):
             self.block.run_tests(
                 execution_partition=self.execution_partition,
                 global_vars=global_vars,
@@ -1164,9 +1242,12 @@ class BlockExecutor:
                 self.logger.exception(
                     f'Failed to execute conditional block {conditional_block.uuid} '
                     f'for block {self.block.uuid}.',
-                    **merge_dict(logging_tags, dict(
-                        error=conditional_err,
-                    )),
+                    **merge_dict(
+                        logging_tags,
+                        dict(
+                            error=conditional_err,
+                        ),
+                    ),
                 )
                 result = False
 
@@ -1227,9 +1308,12 @@ class BlockExecutor:
                 self.logger.exception(
                     f'Failed to execute {callback} callback block {callback_block.uuid} '
                     f'for block {self.block.uuid}.',
-                    **merge_dict(logging_tags, dict(
-                        error=callback_err,
-                    )),
+                    **merge_dict(
+                        logging_tags,
+                        dict(
+                            error=callback_err,
+                        ),
+                    ),
                 )
 
     def _run_commands(
@@ -1250,8 +1334,10 @@ class BlockExecutor:
         Returns:
             A list of command arguments.
         """
-        cmd = f'/app/run_app.sh ' \
-              f'mage run {self.pipeline.repo_config.repo_path} {self.pipeline.uuid}'
+        cmd = (
+            f'/app/run_app.sh '
+            f'mage run {self.pipeline.repo_config.repo_path} {self.pipeline.uuid}'
+        )
         options = [
             '--block-uuid',
             self.block_uuid,
@@ -1303,9 +1389,7 @@ class BlockExecutor:
                 block_run_id = int(callback_url.split('/')[-1])
 
             block_run = BlockRun.query.get(block_run_id)
-            update_kwargs = dict(
-                status=status
-            )
+            update_kwargs = dict(status=status)
 
             if status == BlockRun.BlockRunStatus.COMPLETED:
                 update_kwargs['completed_at'] = datetime.now(tz=pytz.UTC)
@@ -1326,9 +1410,7 @@ class BlockExecutor:
         except Exception as err2:
             self.logger.exception(
                 f'Failed to update block run status to {status} for block {self.block.uuid}.',
-                **merge_dict(tags, dict(
-                    error=err2
-                )),
+                **merge_dict(tags, dict(error=err2)),
             )
 
         block_run_data = dict(status=status)

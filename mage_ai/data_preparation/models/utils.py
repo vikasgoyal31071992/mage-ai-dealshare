@@ -169,6 +169,10 @@ def is_basic_iterable(data: Any) -> bool:
     return isinstance(data, (list, set, tuple))
 
 
+def is_dataframe_or_series(data: Any) -> bool:
+    return isinstance(data, (pd.DataFrame, pd.Series, pl.DataFrame, pl.Series))
+
+
 def infer_variable_type(
     data: Any,
     repo_path: Optional[str] = None,
@@ -182,7 +186,12 @@ def infer_variable_type(
     if isinstance(data, pl.DataFrame) or (
         basic_iterable and len(data) >= 1 and all(isinstance(d, pl.DataFrame) for d in data)
     ):
-        if Project(repo_path=repo_path).is_feature_enabled(FeatureUUID.POLARS):
+        # Need to import here to mock in unit tests.
+        from mage_ai.settings.server import MEMORY_MANAGER_POLARS_V2, MEMORY_MANAGER_V2
+
+        if (MEMORY_MANAGER_V2 and MEMORY_MANAGER_POLARS_V2) or Project(
+            repo_path=repo_path
+        ).is_feature_enabled(FeatureUUID.POLARS):
             variable_type_use = VariableType.POLARS_DATAFRAME
         # If Polars is not enabled, we will fall back to the original logic in variable_manager
         # before this change:
@@ -391,15 +400,23 @@ def construct_value(type_info: Dict[str, Union[str, Optional[str]]], value: Any)
             VariableType(type_info['variable_type']),
         )
 
-    if 'Timestamp' == type_name:
+    if isinstance(value, pd.DataFrame):
+        return pd.DataFrame(value)
+    elif isinstance(value, pd.Series):
+        return pd.Series(value)
+    elif isinstance(value, pl.DataFrame):
+        return pl.DataFrame(value)
+    elif isinstance(value, pl.Series):
+        return pl.Series(value)
+    elif 'Timestamp' == type_name:
         return pd.Timestamp(value)
     elif 'datetime' == type_name:
         return datetime.fromisoformat(value)
     elif 'ndarray' == type_name:
         return np.array(value)
-    elif 'DataFrame' == type_name:
+    elif 'DataFrame' == type_name and not isinstance(value, str):
         return pd.DataFrame(value)
-    elif 'Series' == type_name:
+    elif 'Series' == type_name and not isinstance(value, str):
         return pd.Series(value)
     elif 'tuple' == type_name:
         return tuple(value)
