@@ -1,5 +1,6 @@
 import os
 import socket
+
 from mage_ai.api.resources.GenericResource import GenericResource
 from mage_ai.cluster_manager.constants import ClusterType
 from mage_ai.data_preparation.models.constants import MAX_PRINT_OUTPUT_LINES
