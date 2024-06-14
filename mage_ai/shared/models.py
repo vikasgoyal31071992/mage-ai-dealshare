@@ -3,10 +3,11 @@ import typing
 from dataclasses import dataclass, make_dataclass
 from enum import Enum
 from functools import reduce
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional, Union
 
 import inflection
 
+from mage_ai.shared.environments import is_debug
 from mage_ai.shared.hash import merge_dict
 from mage_ai.shared.parsers import encode_complex
 
@@ -34,33 +35,41 @@ class BaseClass:
         return annotations
 
     @classmethod
-    def load(self, **kwargs):
-        annotations = self.all_annotations()
+    def load(cls, *args, **kwargs):
+        annotations = cls.all_annotations()
 
-        props_init = self.load_to_dict(**kwargs)
+        if args is not None and len(args) >= 1:
+            kwargs = kwargs or {}
+            if isinstance(args[0], dict):
+                kwargs.update(args[0])
+            elif isinstance(args[0], cls):
+                kwargs.update(args[0].to_dict())
+
+        props_init = cls.load_to_dict(**kwargs)
 
         props = {}
         props_not_set = {}
         if props_init:
             for key, value in props_init.items():
-                if self.attribute_aliases and key in self.attribute_aliases:
-                    key = self.attribute_aliases[key]
+                if cls.attribute_aliases and key in cls.attribute_aliases:
+                    key = cls.attribute_aliases[key]
 
                 annotation = annotations.get(key)
                 if annotation:
-                    props[key] = self.convert_value(value, annotation)
+                    props[key] = cls.convert_value(value, annotation)
                 else:
                     props_not_set[key] = value
 
-        model = self(**props)
+        model = cls(**props)
 
         for key, value in props_not_set.items():
             try:
                 if not callable(getattr(model, key)):
                     model.set_value(key, value)
             except AttributeError as err:
-                print(f'[WARNING] {self.__name__}.load: {err}')
-                raise err
+                print(f'[WARNING] {cls.__name__}.load: {err}')
+                if is_debug():
+                    raise err
 
         return model
 
@@ -190,7 +199,13 @@ class BaseClass:
         try:
             value = getattr(self, attribute_name)
             if value and isinstance(value, str):
-                setattr(self, attribute_name, enum_class(value))
+                setattr(
+                    self,
+                    attribute_name,
+                    enum_class.from_value(value)
+                    if issubclass(enum_class, BaseEnum)
+                    else enum_class(value),
+                )
         except AttributeError as err:
             print(f'[WARNING] {self.__class__.__name__}.serialize_attribute_enum: {err}')
 
@@ -201,7 +216,11 @@ class BaseClass:
                 arr = []
                 for value in values:
                     if isinstance(value, str):
-                        arr.append(enum_class(value))
+                        arr.append(
+                            enum_class.from_value(value)
+                            if issubclass(enum_class, BaseEnum)
+                            else enum_class(value)
+                        )
                     else:
                         arr.append(value)
                 setattr(self, attribute_name, arr)
@@ -286,3 +305,20 @@ class Delegator:
     def __init__(self, target: Any):
         self.target = target
         self.delegate = DelegatorTarget(self.target)
+
+
+class BaseEnum(str, Enum):
+    @classmethod
+    def has_value(cls, value: Union[Any, str]) -> bool:
+        if isinstance(value, cls):
+            return True
+        return isinstance(value, str) and value.upper() in (name for name in cls.__members__)
+
+    @classmethod
+    def from_value(cls, value: Union[Any, str]) -> Optional[Any]:
+        if not cls.has_value(value):
+            return None
+        if isinstance(value, cls):
+            return value
+        if isinstance(value, str):
+            return cls[value.upper()]

@@ -54,7 +54,7 @@ class Redshift(Destination):
         they are not enforced by Amazon Redshift.
         https://docs.aws.amazon.com/redshift/latest/dg/t_Defining_constraints.html
         """
-        temp_table_name = self.full_table_name(schema_name, table_name, prefix='temp_')
+        # temp_table_name = self.full_table_name(schema_name, table_name, prefix='temp_')
 
         return [
             build_create_table_command(
@@ -65,14 +65,14 @@ class Redshift(Destination):
                 unique_constraints=unique_constraints,
                 use_lowercase=self.use_lowercase,
             ),
-            build_create_table_command(
-                column_type_mapping=self.column_type_mapping(schema),
-                columns=schema['properties'].keys(),
-                full_table_name=temp_table_name,
-                if_not_exists=True,
-                unique_constraints=unique_constraints,
-                use_lowercase=self.use_lowercase,
-            )
+            # build_create_table_command(
+            #     column_type_mapping=self.column_type_mapping(schema),
+            #     columns=schema['properties'].keys(),
+            #     full_table_name=temp_table_name,
+            #     if_not_exists=True,
+            #     unique_constraints=unique_constraints,
+            #     use_lowercase=self.use_lowercase,
+            # )
         ]
 
     def build_alter_table_commands(
@@ -142,7 +142,7 @@ WHERE TABLE_NAME = '{table_name}' AND TABLE_SCHEMA = '{schema_name}'
 
         if unique_constraints and UNIQUE_CONFLICT_METHOD_UPDATE == unique_conflict_method:
             full_table_name_temp = self.full_table_name(schema_name, table_name, prefix='temp_')
-            drop_temp_table_command = f'DROP TABLE IF EXISTS {full_table_name_temp}'
+            # drop_temp_table_command = f'DROP TABLE IF EXISTS {full_table_name_temp}'
             truncate_temp_table_command = f'TRUNCATE TABLE {full_table_name_temp}'
             unique_constraints_clean = [
                 f'{self.clean_column_name(col)}'

@@ -37,6 +37,8 @@ def get_int_value(value: str) -> int:
 # ----------------------------------
 
 DEBUG = os.getenv('DEBUG', False)
+DEBUG_MEMORY = str(os.getenv('DEBUG_MEMORY', 0) or 0) in ['1', 'true', 'True']
+DEBUG_FILE_IO = str(os.getenv('DEBUG_FILE_IO', 0) or 0) in ['1', 'true', 'True']
 HIDE_ENV_VAR_VALUES = int(os.getenv('HIDE_ENV_VAR_VALUES', 1) or 1) == 1
 
 
@@ -115,6 +117,7 @@ CONCURRENCY_CONFIG_PIPELINE_RUN_LIMIT = get_int_value(
     os.getenv('CONCURRENCY_CONFIG_PIPELINE_RUN_LIMIT')
 )
 DISABLE_AUTO_BROWSER_OPEN = get_bool_value(os.getenv('DISABLE_AUTO_BROWSER_OPEN', 'False'))
+DISABLE_AUTORELOAD = get_bool_value(os.getenv('DISABLE_AUTORELOAD', 'False'))
 # The hostname in Kubernetes or AWS ECS
 HOSTNAME = os.getenv('HOSTNAME')
 INITIAL_METADATA = os.getenv('INITIAL_METADATA')
@@ -197,12 +200,20 @@ except ValueError:
 # -------------------------
 # System level features
 # -------------------------
-MEMORY_MANAGER_VERSION = int(os.getenv('MEMORY_MANAGER_VERSION', '1'))
-MEMORY_MANAGER_PANDAS_VERSION = int(os.getenv('MEMORY_MANAGER_PANDAS_VERSION', '1'))
-MEMORY_MANAGER_POLARS_VERSION = int(os.getenv('MEMORY_MANAGER_POLARS_VERSION', '1'))
-MEMORY_MANAGER_V2 = MEMORY_MANAGER_VERSION >= 2
-MEMORY_MANAGER_PANDAS_V2 = MEMORY_MANAGER_PANDAS_VERSION >= 2
-MEMORY_MANAGER_POLARS_V2 = MEMORY_MANAGER_POLARS_VERSION >= 2
+# We need to use os.getenv again or else we can’t mock/patch the value in tests.
+DYNAMIC_BLOCKS_VERSION = int(os.getenv('DYNAMIC_BLOCKS_VERSION') or 1)
+DYNAMIC_BLOCKS_V2 = int(os.getenv('DYNAMIC_BLOCKS_VERSION') or 1) >= 2
+MEMORY_MANAGER_VERSION = int(os.getenv('MEMORY_MANAGER_VERSION') or 1)
+MEMORY_MANAGER_V2 = int(os.getenv('MEMORY_MANAGER_VERSION') or 1) >= 2
+MEMORY_MANAGER_PANDAS_VERSION = int(os.getenv('MEMORY_MANAGER_PANDAS_VERSION') or 1)
+MEMORY_MANAGER_POLARS_VERSION = int(os.getenv('MEMORY_MANAGER_POLARS_VERSION') or 1)
+MEMORY_MANAGER_PANDAS_V2 = int(os.getenv('MEMORY_MANAGER_PANDAS_VERSION') or 1) >= 2
+MEMORY_MANAGER_POLARS_V2 = int(os.getenv('MEMORY_MANAGER_POLARS_VERSION') or 1) >= 2
+VARIABLE_DATA_OUTPUT_META_CACHE = str(os.getenv('VARIABLE_DATA_OUTPUT_META_CACHE', 0) or 0) in [
+    '1',
+    'true',
+    'True',
+]
 
 # List of environment variables used to configure Mage. The value of these settings
 # will be copied between workspaces.
@@ -211,6 +222,7 @@ MAGE_SETTINGS_ENVIRONMENT_VARIABLES = [
     'CONCURRENCY_CONFIG_PIPELINE_RUN_LIMIT',
     'DISABLE_NOTEBOOK_EDIT_ACCESS',
     'DISABLE_AUTO_BROWSER_OPEN',
+    'DISABLE_AUTORELOAD',
     'REQUIRE_USER_AUTHENTICATION',
     'AUTHENTICATION_MODE',
     'OAUTH_DEFAULT_ACCESS',

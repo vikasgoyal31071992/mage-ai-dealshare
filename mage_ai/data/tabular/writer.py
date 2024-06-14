@@ -12,7 +12,6 @@ from mage_ai.data.tabular.constants import COLUMN_CHUNK
 from mage_ai.data.tabular.models import DEFAULT_BATCH_ITEMS_VALUE, BatchSettings
 from mage_ai.data.tabular.utils import multi_series_to_frame
 from mage_ai.shared.environments import is_debug
-from mage_ai.shared.parsers import object_to_dict
 
 
 def append_chunk_column(
@@ -85,10 +84,15 @@ def to_parquet_sync(
     output_dir: str,
     df: Optional[Union[pl.DataFrame, pl.Series, pd.Series]] = None,
     dfs: Optional[Union[List[pl.DataFrame], pl.Series, pd.Series]] = None,
+    basename_template: Optional[str] = None,
+    existing_data_behavior: Optional[str] = None,
     metadata: Optional[Dict] = None,
     partition_cols: Optional[List[str]] = None,
     settings: Optional[BatchSettings] = None,
-):
+) -> Dict[str, int]:
+    total_rows = 0
+    total_columns = 0
+
     for table, partition_columns in __prepare_data(
         output_dir=output_dir,
         df=df,
@@ -99,21 +103,35 @@ def to_parquet_sync(
     ):
         pq.write_to_dataset(
             table,
-            root_path=output_dir,
-            partition_cols=partition_columns,
-            use_dictionary=True,
+            basename_template=basename_template,
             compression='snappy',
+            existing_data_behavior=existing_data_behavior,
+            partition_cols=partition_columns,
+            root_path=output_dir,
+            use_dictionary=True,
         )
+        total_rows += table.num_rows
+        total_columns = max(len(table.schema.names), total_columns)
+
+    return dict(
+        columns=total_columns,
+        rows=total_rows,
+    )
 
 
 async def to_parquet_async(
     output_dir: str,
     df: Optional[Union[pl.DataFrame, pl.Series, pd.Series]] = None,
     dfs: Optional[Union[List[pl.DataFrame], pl.Series, pd.Series]] = None,
+    basename_template: Optional[str] = None,
+    existing_data_behavior: Optional[str] = None,
     metadata: Optional[Dict] = None,
     partition_cols: Optional[List[str]] = None,
     settings: Optional[BatchSettings] = None,
-):
+) -> Dict[str, int]:
+    total_rows = 0
+    total_columns = 0
+
     for table, partition_columns in __prepare_data(
         output_dir=output_dir,
         df=df,
@@ -122,12 +140,26 @@ async def to_parquet_async(
         partition_cols=partition_cols,
         settings=settings,
     ):
-        await __write_to_dataset_async(table, output_dir, partition_columns)
+        await __write_to_dataset_async(
+            table,
+            root_path=output_dir,
+            existing_data_behavior=existing_data_behavior,
+            partition_cols=partition_columns,
+        )
+        total_rows += table.num_rows
+        total_columns = max(len(table.schema.names), total_columns)
+
+    return dict(
+        columns=total_columns,
+        rows=total_rows,
+    )
 
 
 async def __write_to_dataset_async(
     table: pa.Table,
-    output_dir: str,
+    root_path: str,
+    basename_template: Optional[str] = None,
+    existing_data_behavior: Optional[str] = None,
     partition_cols: Optional[List[str]] = None,
 ):
     loop = asyncio.get_event_loop()
@@ -135,9 +167,11 @@ async def __write_to_dataset_async(
         None,
         pq.write_to_dataset,
         table,
-        output_dir,
+        basename_template=basename_template,
         compression='snappy',
+        existing_data_behavior=existing_data_behavior,
         partition_cols=partition_cols,
+        root_path=root_path,
         use_dictionary=True,
     )
 
@@ -172,7 +206,7 @@ def __prepare_data(
     if chunk_size is not None and num_buckets is not None:
         chunk_size = DEFAULT_BATCH_ITEMS_VALUE
 
-    df, dfs, series_sample = multi_series_to_frame(df, dfs)
+    df, dfs, series_sample, object_metadata = multi_series_to_frame(df, dfs)
 
     chunk_sizes = [] + ([chunk_size] if chunk_size else [])
     if dfs is not None:
@@ -208,10 +242,8 @@ def __prepare_data(
         metadata['chunk_sizes'] = chunk_sizes
     if num_buckets:
         metadata['num_buckets'] = num_buckets
-    if series_sample is not None:
-        metadata['object'] = json.dumps(
-            object_to_dict(series_sample, include_hash=False, include_uuid=False)
-        )
+    if object_metadata:
+        metadata['object'] = json.dumps(object_metadata)
 
     # Convert the Polars DataFrame to a PyArrow Table first
     table = add_custom_metadata_to_table(df.to_arrow(), metadata)

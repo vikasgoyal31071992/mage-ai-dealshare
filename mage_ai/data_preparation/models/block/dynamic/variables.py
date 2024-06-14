@@ -2,15 +2,31 @@ from __future__ import annotations
 
 import asyncio
 import os
+import re
 from collections.abc import Sequence
 from logging import Logger
 from typing import Any, Dict, List, Optional, Tuple, Union
 
 import pandas as pd
+import polars as pl
 
+from mage_ai.data.constants import InputDataType
+from mage_ai.data.tabular.models import BatchSettings
+from mage_ai.data_preparation.models.block.dynamic.data import (
+    calculate_dynamic_index_data_index,
+)
+from mage_ai.data_preparation.models.block.settings.variables.models import (
+    ChunkKeyTypeUnion,
+)
 from mage_ai.data_preparation.models.constants import BlockLanguage, BlockType
 from mage_ai.data_preparation.models.variable import Variable
+from mage_ai.data_preparation.models.variables.utils import (
+    get_first_data_output_variable,
+)
+from mage_ai.io.base import ExportWritePolicy
+from mage_ai.settings.server import DEBUG_MEMORY, MEMORY_MANAGER_V2
 from mage_ai.shared.strings import to_ordinal_integers
+from mage_ai.system.memory.wrappers import execute_with_memory_tracking
 
 
 class LazyVariable:
@@ -31,7 +47,9 @@ class LazyVariable:
     def is_dynamic(self):
         from mage_ai.data_preparation.models.block.dynamic.utils import is_dynamic_block
 
-        return is_dynamic_block(self.block)
+        return (self.block.is_dynamic_v2 and self.block.is_dynamic_parent) or is_dynamic_block(
+            self.block
+        )
 
     def read_data(self):
         result = self.variable.read_data(
@@ -101,7 +119,9 @@ class LazyVariableSet(Sequence):
     def is_dynamic(self):
         from mage_ai.data_preparation.models.block.dynamic.utils import is_dynamic_block
 
-        return is_dynamic_block(self.block)
+        return (self.block.is_dynamic_v2 and self.block.is_dynamic_parent) or is_dynamic_block(
+            self.block
+        )
 
     @property
     def lazy_child_data(self) -> Union[List[LazyVariable], LazyVariable]:
@@ -116,10 +136,7 @@ class LazyVariableSet(Sequence):
         return None
 
     def read_child_data(self) -> Any:
-        if (
-            not isinstance(self.lazy_child_data, pd.DataFrame)
-            and not self.lazy_child_data
-        ):
+        if not isinstance(self.lazy_child_data, pd.DataFrame) and not self.lazy_child_data:
             return None
 
         if isinstance(self.lazy_child_data, list):
@@ -189,7 +206,9 @@ class LazyVariableController(Sequence):
     def is_dynamic(self):
         from mage_ai.data_preparation.models.block.dynamic.utils import is_dynamic_block
 
-        return is_dynamic_block(self.block)
+        return (self.block.is_dynamic_v2 and self.block.is_dynamic_parent) or is_dynamic_block(
+            self.block
+        )
 
     def render(
         self,
@@ -205,9 +224,11 @@ class LazyVariableController(Sequence):
             child_data, metadata = lazy_variable_set.read_data()
 
             if self.is_dynamic:
-                if isinstance(child_data, pd.DataFrame):
+                if child_data is None:
+                    child_data = [None]
+                elif isinstance(child_data, pd.DataFrame):
                     index = child_dynamic_block_index % len(child_data.index)
-                    child_data = child_data.iloc[index: index + 1]
+                    child_data = child_data.iloc[index : index + 1]
                 else:
                     index = child_dynamic_block_index % len(child_data)
                     child_data = child_data[index]
@@ -216,7 +237,7 @@ class LazyVariableController(Sequence):
             return [child_data, metadata]
 
         if dynamic_block_index is not None:
-            arr = arr[dynamic_block_index: dynamic_block_index + 1]
+            arr = arr[dynamic_block_index : dynamic_block_index + 1]
 
         if lazy_load:
             return arr
@@ -231,7 +252,7 @@ class LazyVariableController(Sequence):
         arr = self.lazy_variable_sets
 
         if dynamic_block_index is not None:
-            arr = arr[dynamic_block_index: dynamic_block_index + 1]
+            arr = arr[dynamic_block_index : dynamic_block_index + 1]
 
         if lazy_load:
             return arr
@@ -243,7 +264,7 @@ class LazyVariableController(Sequence):
 
 def get_dynamic_child_block_indexes(
     block,
-    execution_partition: str = None,
+    execution_partition: Optional[str] = None,
 ) -> List[int]:
     from mage_ai.data_preparation.models.block.dynamic.utils import (
         build_combinations_for_dynamic_child,
@@ -255,20 +276,35 @@ def get_dynamic_child_block_indexes(
         1/
         2/
     """
-    count = len(
-        build_combinations_for_dynamic_child(
-            block,
-            execution_partition=execution_partition,
-        )
+    combos = build_combinations_for_dynamic_child(
+        block,
+        execution_partition=execution_partition,
     )
+    count = len(combos)
 
     return [i for i in range(count)]
 
 
+def sort_variables(variable_object):
+    # Using regular expressions to find all digits in the directory path
+    numbers = []
+    for text in [
+        str(variable_object.block_dir_name),
+        str(variable_object.uuid),
+    ]:
+        number = re.findall('\\d+', text)
+        if number:
+            numbers += number
+        else:
+            numbers.append(to_ordinal_integers(text)[0])
+    # Convert found strings to integers for correct numeric sort
+    return tuple(map(int, numbers))
+
+
 def get_variable_objects(
-    block,
-    execution_partition: str = None,
-    dynamic_block_index: int = None,
+    block: Any,
+    execution_partition: Optional[str] = None,
+    dynamic_block_index: Optional[int] = None,
 ) -> List[Variable]:
     """
     If dynamic_block_index, get the folder names in the nested folder named after the
@@ -280,10 +316,15 @@ def get_variable_objects(
     Or else:
         output_0/
         output_1/
+
+    Or
+        output_0/
+            0/
+            1/
+        output_1/
+            0/
+            1/
     """
-    pipeline = block.pipeline
-    pipeline_uuid = pipeline.uuid
-    variable_manager = pipeline.variable_manager
 
     """
     If block is a dynamic child block, get the variable objects specifically in the directory
@@ -295,41 +336,34 @@ def get_variable_objects(
     if dynamic_block_index is not None:
         block_uuid = os.path.join(block_uuid, str(dynamic_block_index))
 
-    variable_uuids = variable_manager.get_variables_by_block(
-        block.pipeline.uuid,
-        block_uuid=block_uuid,
+    variable_uuids = block.get_variables_by_block(
+        block_uuid,
         clean_block_uuid=dynamic_block_index is None,
         partition=execution_partition,
     )
 
-    def __sort(variable_object: str):
-        if not variable_object:
-            return -96, -96
-        return (
-            to_ordinal_integers(variable_object.block_dir_name)[0],
-            variable_object.uuid,
-        )
-
     return sorted(
         [
-            variable_manager.get_variable_object(
-                block_uuid=block_uuid,
+            block.get_variable_object(
+                block_uuid,
+                variable_uuid,
                 clean_block_uuid=dynamic_block_index is None,
+                ordinal_position=int(dynamic_block_index)
+                if dynamic_block_index is not None
+                else None,
                 partition=execution_partition,
-                pipeline_uuid=pipeline_uuid,
-                variable_uuid=variable_uuid,
             )
             for variable_uuid in variable_uuids
             if variable_uuid != ''
         ],
-        key=__sort,
+        key=sort_variables,
     )
 
 
 def delete_variable_objects_for_dynamic_child(
     block,
-    dynamic_block_index: int = None,
-    execution_partition: str = None,
+    dynamic_block_index: Optional[int] = None,
+    execution_partition: Optional[str] = None,
 ) -> None:
     variable_objects = get_variable_objects(
         block,
@@ -337,13 +371,23 @@ def delete_variable_objects_for_dynamic_child(
         execution_partition=execution_partition,
     )
     if variable_objects:
+        write_policy = (
+            block.write_settings.batch_settings.mode
+            if block.write_settings and block.write_settings.batch_settings
+            else None
+        )
         for variable_object in variable_objects:
-            variable_object.delete()
+            if write_policy and variable_object.data_exists():
+                if ExportWritePolicy.FAIL == write_policy:
+                    raise Exception(f'Write policy for block {block.uuid} is {write_policy}.')
+                elif ExportWritePolicy.APPEND != write_policy:
+                    variable_object.delete()
 
 
 def __get_all_variable_objects_for_dynamic_child(
     block,
     execution_partition: Optional[str] = None,
+    limit_parts: Optional[int] = None,
 ) -> List[List[Variable]]:
     """
     This method will get the nested outputs (output_0) in every numeric folder
@@ -351,9 +395,8 @@ def __get_all_variable_objects_for_dynamic_child(
     """
     variable_objects_arr = []
 
-    indexes = get_dynamic_child_block_indexes(
-        block, execution_partition=execution_partition
-    )
+    indexes = get_dynamic_child_block_indexes(block, execution_partition=execution_partition)
+
     for dynamic_block_index in indexes:
         # 0/output_0,
         # 0/output_1,
@@ -366,15 +409,10 @@ def __get_all_variable_objects_for_dynamic_child(
             dynamic_block_index=dynamic_block_index,
         )
 
-        def __sort(variable_object: str):
-            if not variable_object:
-                return -96, -96
-            return (
-                to_ordinal_integers(variable_object.block_dir_name)[0],
-                variable_object.uuid,
-            )
+        variable_objects_arr.append(sorted(arr, key=sort_variables))
 
-        variable_objects_arr.append(sorted(arr, key=__sort))
+    if limit_parts is not None:
+        variable_objects_arr = variable_objects_arr[:limit_parts]
 
     return variable_objects_arr
 
@@ -383,6 +421,7 @@ async def get_outputs_async(
     block,
     execution_partition: Optional[str] = None,
     dynamic_block_index: Optional[int] = None,
+    limit_parts: Optional[int] = None,
     sample: bool = False,
     sample_count: Optional[int] = None,
 ) -> List[Optional[Union[Dict, int, str, pd.DataFrame, Any]]]:
@@ -392,15 +431,14 @@ async def get_outputs_async(
         dynamic_block_index=dynamic_block_index,
     )
 
-    return await asyncio.gather(
-        *[
-            variable_object.read_data_async(
-                sample=sample,
-                sample_count=sample_count,
-            )
-            for variable_object in variable_objects
-        ]
-    )
+    return await asyncio.gather(*[
+        variable_object.read_data_async(
+            limit_parts=limit_parts,
+            sample=sample,
+            sample_count=sample_count,
+        )
+        for variable_object in variable_objects
+    ])
 
 
 def get_outputs(
@@ -425,20 +463,85 @@ def get_outputs(
     ]
 
 
+def __get_first_data_output_variable(
+    block: Any,
+    execution_partition: Optional[str] = None,
+    dynamic_block_index: Optional[int] = None,
+):
+    variable_objects = get_variable_objects(
+        block,
+        execution_partition=execution_partition,
+        dynamic_block_index=dynamic_block_index,
+    )
+    return get_first_data_output_variable(variable_objects)
+
+
+def get_dynamic_children_count(
+    block: Any,
+    dynamic_block_index: Optional[int] = None,
+    execution_partition: Optional[str] = None,
+    variable_uuid: Optional[str] = None,
+) -> Tuple[Optional[int], bool]:
+    output_variable = __get_first_data_output_variable(
+        block, execution_partition=execution_partition, dynamic_block_index=dynamic_block_index
+    )
+    if output_variable:
+        return output_variable.items_count(), output_variable.is_partial_data_readable()
+
+    return None, False
+
+
+def get_partial_dynamic_block_outputs(
+    block: Any,
+    index: int,
+    batch_settings: Optional[BatchSettings] = None,
+    chunks: Optional[List[ChunkKeyTypeUnion]] = None,
+    dynamic_block_index: Optional[int] = None,
+    execution_partition: Optional[str] = None,
+    input_data_types: Optional[List[InputDataType]] = None,
+) -> Tuple[Optional[Any], Optional[Dict[str, Any]]]:
+    output_variable = __get_first_data_output_variable(
+        block, execution_partition=execution_partition, dynamic_block_index=dynamic_block_index
+    )
+    result = None
+    if output_variable and output_variable.is_partial_data_readable():
+        result = block.read_partial_data(
+            output_variable.uuid,
+            batch_settings=batch_settings,
+            chunks=chunks,
+            partition=execution_partition,
+            input_data_types=input_data_types,
+            part_uuid=int(index),
+        )
+
+    return result, None
+
+
 def get_outputs_for_dynamic_block(
-    block, **kwargs
+    block, origin_block: Optional[Any] = None, **kwargs
 ) -> List[Optional[Union[Dict, int, str, pd.DataFrame, Any]]]:
-    values = get_outputs(block, **kwargs)
+    def func():
+        values = get_outputs(block, **kwargs)
 
-    if BlockLanguage.SQL == block.language:
-        return [values[0] if len(values) == 1 else values, None]
+        if BlockLanguage.SQL == block.language:
+            return [values[0] if len(values) == 1 else values, None]
 
-    if len(values) >= 2:
-        return values[0], values[1]
-    elif len(values) >= 1:
-        return [values[0], None]
+        if len(values) >= 2:
+            return values[0], values[1]
+        elif len(values) >= 1:
+            return [values[0], None]
 
-    return [None, None]
+        return [None, None]
+
+    if DEBUG_MEMORY:
+        result, _ = execute_with_memory_tracking(
+            func,
+            log_message_prefix=f'[{(origin_block or block).uuid}:get_outputs_for_dynamic_block]',
+        )
+
+        return result
+
+    return func()
 
 
 async def get_outputs_for_dynamic_block_async(
@@ -460,31 +563,57 @@ async def get_outputs_for_dynamic_block_async(
 def get_outputs_for_dynamic_child(
     block,
     execution_partition: Optional[str] = None,
+    limit_parts: Optional[int] = None,
     logger: Optional[Logger] = None,
     logging_tags: Optional[Dict] = None,
     sample: bool = False,
     sample_count: Optional[int] = None,
 ) -> List[Tuple[List[Union[Dict, int, str, pd.DataFrame]], List[Dict]]]:
-    # List[List[Variable]]
-    list_of_lists_of_variables = __get_all_variable_objects_for_dynamic_child(
-        block,
-        execution_partition=execution_partition,
+    def func():
+        # List[List[Variable]]
+        list_of_lists_of_variables = __get_all_variable_objects_for_dynamic_child(
+            block,
+            execution_partition=execution_partition,
+            limit_parts=limit_parts,
+        )
+
+        # List[List[LazyVariableSet]]
+        lazy_variables_sets = [
+            LazyVariableSet(
+                block,
+                variable_objects,
+                logger=logger,
+                logging_tags=logging_tags,
+                sample=sample,
+                sample_count=sample_count,
+            )
+            for variable_objects in list_of_lists_of_variables
+        ]
+
+        return LazyVariableController(block, lazy_variables_sets)
+
+    result, _ = execute_with_memory_tracking(
+        func,
+        log_message_prefix=f'[{block.uuid}:get_outputs_for_dynamic_child]',
+    )
+    return result
+
+
+def dynamic_upstream_block_item_counts(block, partition: Optional[str] = None) -> List[int]:
+    from mage_ai.data_preparation.models.block.dynamic.counter import DynamicItemCounter
+    from mage_ai.data_preparation.models.block.dynamic.utils import (
+        is_dynamic_block,
+        is_dynamic_block_child,
     )
 
-    # List[List[LazyVariableSet]]
-    lazy_variables_sets = [
-        LazyVariableSet(
-            block,
-            variable_objects,
-            logger=logger,
-            logging_tags=logging_tags,
-            sample=sample,
-            sample_count=sample_count,
-        )
-        for variable_objects in list_of_lists_of_variables
+    return [
+        DynamicItemCounter.build_counter(
+            b, downstream_block=block, partition=partition
+        ).item_count()
+        for b in block.upstream_blocks
+        if (b.is_dynamic_v2 and (b.should_dynamically_generate_block(block) or b.is_dynamic_child))
+        or (is_dynamic_block(b) or is_dynamic_block_child(b))
     ]
-
-    return LazyVariableController(block, lazy_variables_sets)
 
 
 def fetch_input_variables_for_dynamic_upstream_blocks(
@@ -505,11 +634,21 @@ def fetch_input_variables_for_dynamic_upstream_blocks(
     input_vars = []
     kwargs_vars = []
     upstream_block_uuids = []
+    dynamic_upstream_item_counts = dynamic_upstream_block_item_counts(
+        block, partition=execution_partition
+    )
 
-    for upstream_block in block.upstream_blocks:
-        is_dynamic_child = is_dynamic_block_child(upstream_block)
-        is_dynamic = is_dynamic_block(upstream_block)
-        reduce_output = should_reduce_output(upstream_block)
+    for upstream_position_index, upstream_block in enumerate(block.upstream_blocks):
+        if block.is_dynamic_v2:
+            is_dynamic_child = upstream_block.is_dynamic_child
+            is_dynamic = upstream_block.should_dynamically_generate_block(block)
+            reduce_output = upstream_block.should_reduce_output_for_downstream_block(
+                block
+            ) or block.should_reduce_output_from_upstream_block(upstream_block)
+        else:
+            is_dynamic_child = is_dynamic_block_child(upstream_block)
+            is_dynamic = is_dynamic_block(upstream_block)
+            reduce_output = should_reduce_output(upstream_block)
 
         upstream_block_uuid = upstream_block.uuid
 
@@ -523,10 +662,7 @@ def fetch_input_variables_for_dynamic_upstream_blocks(
 
             # If dynamic child should reduce its output (which means it passes the entire
             # output to its downstream blocks):
-            if (
-                should_reduce_output(upstream_block)
-                and block.type != BlockType.EXTENSION
-            ):
+            if reduce_output and block.type != BlockType.EXTENSION:
                 child_data = []
                 metadata = {}
                 for lazy_variable_set in lazy_variable_controller:
@@ -541,6 +677,12 @@ def fetch_input_variables_for_dynamic_upstream_blocks(
                 # The first index is used to select which dynamic child to get data from
                 # the 2nd index is used to determine which value from the dynamic list to
                 # fetch as the input variable.
+                index = calculate_dynamic_index_data_index(
+                    dynamic_block_index,
+                    upstream_position_index,
+                    len(lazy_variable_controller),
+                    dynamic_upstream_item_counts,
+                )
                 pair = lazy_variable_controller.render(
                     child_dynamic_block_index=dynamic_block_index,
                 )
@@ -548,25 +690,64 @@ def fetch_input_variables_for_dynamic_upstream_blocks(
                 input_vars.append(child_data)
                 kwargs_vars.append(metadata)
         elif is_dynamic:
-            child_data, metadata = get_outputs_for_dynamic_block(
-                upstream_block,
-                execution_partition=execution_partition,
-            )
-            index = dynamic_block_index % len(child_data)
+            child_data_count = None
+            is_partial_data_readable = False
 
-            if isinstance(child_data, list):
-                input_vars.append(child_data[index])
-            elif isinstance(child_data, pd.DataFrame):
-                row = child_data.iloc[index]
-                input_vars.append(row.to_dict() if row is not None else row)
-            elif isinstance(child_data, dict):
-                input_vars.append(child_data.get(index))
+            if MEMORY_MANAGER_V2:
+                child_data_count, is_partial_data_readable = get_dynamic_children_count(
+                    upstream_block,
+                    execution_partition=execution_partition,
+                )
 
-            if metadata and index < len(metadata):
-                if isinstance(metadata, list):
-                    kwargs_vars.append(metadata[index])
-                elif isinstance(metadata, dict):
+            if child_data_count is not None and is_partial_data_readable:
+                index = calculate_dynamic_index_data_index(
+                    dynamic_block_index,
+                    upstream_position_index,
+                    child_data_count,
+                    dynamic_upstream_item_counts,
+                )
+                child_data, metadata = get_partial_dynamic_block_outputs(
+                    upstream_block,
+                    index,
+                    batch_settings=block.upstream_batch_settings(upstream_block.uuid),
+                    chunks=block.upstream_chunks(upstream_block.uuid),
+                    execution_partition=execution_partition,
+                    input_data_types=block.input_data_types(upstream_block.uuid),
+                )
+                input_vars.append(child_data)
+
+                if metadata is not None and isinstance(metadata, dict):
                     kwargs_vars.append(metadata)
+            else:
+                child_data, metadata = get_outputs_for_dynamic_block(
+                    upstream_block,
+                    execution_partition=execution_partition,
+                )
+                child_data_count = len(child_data) if hasattr(child_data, '__len__') else 0
+                if child_data_count >= 1:
+                    index = calculate_dynamic_index_data_index(
+                        dynamic_block_index,
+                        upstream_position_index,
+                        child_data_count,
+                        dynamic_upstream_item_counts,
+                    )
+
+                    if isinstance(child_data, list):
+                        input_vars.append(child_data[index])
+                    elif isinstance(child_data, (pd.DataFrame,)):
+                        row = child_data.iloc[index]
+                        input_vars.append(row)
+                    elif isinstance(child_data, (pl.DataFrame,)):
+                        row = child_data[index]
+                        input_vars.append(row)
+                    elif isinstance(child_data, dict):
+                        input_vars.append(child_data.get(index))
+
+                    if metadata is not None:
+                        if isinstance(metadata, list) and index < len(metadata):
+                            kwargs_vars.append(metadata[index])
+                        elif isinstance(metadata, dict):
+                            kwargs_vars.append(metadata)
         else:
             from mage_ai.data_preparation.models.block.utils import (
                 fetch_input_variables,
