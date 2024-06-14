@@ -1,4 +1,5 @@
 import os
+import socket
 
 from mage_ai.api.resources.GenericResource import GenericResource
 from mage_ai.cluster_manager.constants import ClusterType
@@ -80,6 +81,7 @@ class StatusResource(GenericResource):
             'require_user_permissions': REQUIRE_USER_PERMISSIONS,
             'project_type': project_type,
             'project_uuid': get_project_uuid(),
+            'host_ip': socket.gethostbyname(socket.gethostname())
         }
 
         display_format = meta.get('_format') if meta else None
