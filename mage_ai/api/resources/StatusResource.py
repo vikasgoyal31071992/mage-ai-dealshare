@@ -1,5 +1,5 @@
 import os
-
+import socket
 from mage_ai.api.resources.GenericResource import GenericResource
 from mage_ai.cluster_manager.constants import ClusterType
 from mage_ai.data_preparation.models.constants import MAX_PRINT_OUTPUT_LINES
@@ -51,7 +51,7 @@ class StatusResource(GenericResource):
                     instance_type = ClusterType.K8S
             except ModuleNotFoundError:
                 pass
-
+        hostname = socket.gethostname()
         status = {
             'is_instance_manager': os.getenv(MANAGE_ENV_VAR) == '1',
             'repo_path': get_repo_path(
@@ -80,6 +80,7 @@ class StatusResource(GenericResource):
             'require_user_permissions': REQUIRE_USER_PERMISSIONS,
             'project_type': project_type,
             'project_uuid': get_project_uuid(),
+            'host': socket.gethostbyname(hostname),
         }
 
         display_format = meta.get('_format') if meta else None

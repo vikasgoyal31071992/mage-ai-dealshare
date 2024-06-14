@@ -18,6 +18,7 @@ class StatusPresenter(BasePresenter):
         'require_user_permissions',
         'project_type',
         'project_uuid',
+        'host',
     ]
 
 
