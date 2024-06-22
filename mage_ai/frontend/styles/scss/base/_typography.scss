@@ -1,0 +1,121 @@
+// styles/typography.ts -> base/typography.scss
+@use '../themes/fonts' as fontsVariables;
+
+@mixin base-font-family {
+  font-family: map-get(fontsVariables.$fonts, family, base, regular);
+
+  &.light {
+    font-family: map-get(fontsVariables.$fonts, family, base, lightFont);
+  }
+  &.medium {
+    font-family: map-get(fontsVariables.$fonts, family, base, medium);
+  }
+  &.semiBold {
+    font-family: map-get(fontsVariables.$fonts, family, base, semiBold);
+  }
+  &.black {
+    font-family: map-get(fontsVariables.$fonts, family, base, black);
+  }
+  &.bold {
+    font-family: map-get(fontsVariables.$fonts, family, base, bold);
+  }
+}
+
+@mixin monospace-font-family {
+  font-family: map-get(fontsVariables.$fonts, family, monospace, regular);
+
+  &.monospace.light {
+    font-family: map-get(fontsVariables.$fonts, family, monospace, lightFont);
+  }
+  &.monospace.medium {
+    font-family: map-get(fontsVariables.$fonts, family, monospace, medium);
+  }
+  &.monospace.semiBold {
+    font-family: map-get(fontsVariables.$fonts, family, monospace, semiBold);
+  }
+  &.monospace.black,
+  &.monospace.bold {
+    font-family: map-get(fontsVariables.$fonts, family, monospace, bold);
+
+    &.italic {
+      font-family: map-get(fontsVariables.$fonts, family, monospace, boldItalic) !important;
+    }
+  }
+
+  &.monospace.italic {
+    font-family: map-get(fontsVariables.$fonts, family, monospace, regularItalic);
+  }
+}
+
+@mixin base-styles {
+  color: var(--fonts-color-text-base);
+  margin: 0;
+
+  &.inverted {
+    color: var(--fonts-color-text-inverted);
+  }
+  &.blue {
+    color: var(--fonts-color-text-blue);
+  }
+  &.muted {
+    color: var(--fonts-color-text-muted);
+  }
+  &.warning {
+    color: var(--fonts-color-text-warning);
+  }
+
+  font-size: map-get(fontsVariables.$fonts, size, base);
+  font-style: map-get(fontsVariables.$fonts, style, base);
+  font-weight: map-get(fontsVariables.$fonts, weight, regular);
+
+  &.italic {
+    font-style: map-get(fontsVariables.$fonts, style, italic);
+  }
+  &.light {
+    font-weight: map-get(fontsVariables.$fonts, weight, light);
+  }
+  &.medium {
+    font-weight: map-get(fontsVariables.$fonts, weight, medium);
+  }
+  &.semiBold {
+    font-weight: map-get(fontsVariables.$fonts, weight, semiBold);
+  }
+  &.bold {
+    font-weight: map-get(fontsVariables.$fonts, weight, bold);
+  }
+}
+@mixin base {
+  @include base-styles;
+  @include base-font-family;
+  line-height: map-get(fontsVariables.$fonts, lineHeight, md);
+}
+
+@mixin base-sm {
+  @include base;
+  font-size: map-get(fontsVariables.$fonts, size, sm);
+  line-height: map-get(fontsVariables.$fonts, lineHeight, base);
+}
+
+@mixin base-xs {
+  @include base;
+  font-size: map-get(fontsVariables.$fonts, size, xs);
+  line-height: map-get(fontsVariables.$fonts, lineHeight, xs);
+}
+
+@mixin monospace {
+  @include base-styles;
+  @include monospace-font-family;
+  line-height: map-get(fontsVariables.$fonts, lineHeight, monospace);
+}
+
+@mixin monospace-sm {
+  @include monospace;
+  font-size: map-get(fontsVariables.$fonts, size, sm);
+  line-height: map-get(fontsVariables.$fonts, lineHeight, base);
+}
+
+@mixin monospace-xs {
+  @include monospace;
+  font-size: map-get(fontsVariables.$fonts, size, xs);
+  line-height: map-get(fontsVariables.$fonts, lineHeight, xs);
+}

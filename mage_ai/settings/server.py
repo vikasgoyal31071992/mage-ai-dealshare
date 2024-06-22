@@ -108,6 +108,9 @@ except ValueError:
 # for the first time. value should be the name of a Mage role (e.g. Viewer, Editor, Admin)
 OAUTH_DEFAULT_ACCESS = os.getenv('OAUTH_DEFAULT_ACCESS')
 
+DEFAULT_OWNER_EMAIL = os.getenv('DEFAULT_OWNER_EMAIL') or 'admin@admin.com'
+DEFAULT_OWNER_PASSWORD = os.getenv('DEFAULT_OWNER_PASSWORD') or 'admin'
+DEFAULT_OWNER_USERNAME = os.getenv('DEFAULT_OWNER_USERNAME') or 'admin'
 
 # ---------------------
 # General Server Settings
@@ -122,6 +125,7 @@ DISABLE_AUTORELOAD = get_bool_value(os.getenv('DISABLE_AUTORELOAD', 'False'))
 HOSTNAME = os.getenv('HOSTNAME')
 INITIAL_METADATA = os.getenv('INITIAL_METADATA')
 LOGS_DIR_PATH = os.getenv('LOGS_DIR_PATH')
+MAGE_CLUSTER_UUID = os.getenv('MAGE_CLUSTER_UUID') or 'mage'
 MAX_FILE_CACHE_SIZE = os.getenv('MAX_FILE_CACHE_SIZE') or (1024 * 1024)  # 1 MB
 ENABLE_USER_PROJECTS = get_bool_value(os.getenv('ENABLE_USER_PROJECTS'))
 REDIS_URL = os.getenv('REDIS_URL')
@@ -198,8 +202,9 @@ except ValueError:
     SCHEDULER_TRIGGER_INTERVAL = 10
 
 # -------------------------
-# System level features
+# Data processing
 # -------------------------
+
 # We need to use os.getenv again or else we can’t mock/patch the value in tests.
 DYNAMIC_BLOCKS_VERSION = int(os.getenv('DYNAMIC_BLOCKS_VERSION') or 1)
 DYNAMIC_BLOCKS_V2 = int(os.getenv('DYNAMIC_BLOCKS_VERSION') or 1) >= 2
@@ -214,6 +219,17 @@ VARIABLE_DATA_OUTPUT_META_CACHE = str(os.getenv('VARIABLE_DATA_OUTPUT_META_CACHE
     'true',
     'True',
 ]
+
+# -------------------------
+# IDE settings
+# -------------------------
+
+KERNEL_MANAGER = os.getenv('KERNEL_MANAGER', 'default')
+KERNEL_MAGIC = os.getenv('KERNEL_MANAGER', 'default') == 'magic'
+
+# -------------------------
+# System level features
+# -------------------------
 
 # List of environment variables used to configure Mage. The value of these settings
 # will be copied between workspaces.

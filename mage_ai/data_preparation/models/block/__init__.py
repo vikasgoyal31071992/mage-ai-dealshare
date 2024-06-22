@@ -10,6 +10,7 @@ import time
 import traceback
 from contextlib import contextmanager, redirect_stderr, redirect_stdout
 from datetime import datetime
+from enum import Enum
 from inspect import Parameter, isfunction, signature
 from logging import Logger
 from pathlib import Path
@@ -2864,7 +2865,11 @@ class Block(
 
     def get_executor_type(self) -> str:
         if self.executor_type:
-            block_executor_type = Template(self.executor_type).render(**get_template_vars())
+            if isinstance(self.executor_type, Enum):
+                executor_type_str = self.executor_type.value
+            else:
+                executor_type_str = self.executor_type
+            block_executor_type = Template(executor_type_str).render(**get_template_vars())
         else:
             block_executor_type = None
         if not block_executor_type or block_executor_type == ExecutorType.LOCAL_PYTHON:
@@ -3571,6 +3576,12 @@ class Block(
         # Add pipeline uuid and block uuid to global_vars
         global_vars['pipeline_uuid'] = self.pipeline_uuid
         global_vars['block_uuid'] = self.uuid
+
+        # Add repo_path to global_vars
+        if self.pipeline and self.pipeline.repo_path:
+            global_vars['repo_path'] = self.pipeline.repo_path
+            # Setting value in os.environ is local to python subprocess
+            os.environ['MAGE_RUNTIME__REPO_PATH'] = self.pipeline.repo_path
 
         if dynamic_block_index is not None:
             global_vars['dynamic_block_index'] = dynamic_block_index

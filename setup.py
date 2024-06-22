@@ -18,7 +18,7 @@ setuptools.setup(
     name='mage-ai',
     # NOTE: when you change this, change the value of VERSION in the following file:
     # mage_ai/server/constants.py
-    version='0.9.71',
+    version='0.9.72',
     author='Mage',
     author_email='eng@mage.ai',
     description='Mage is a tool for building and deploying data pipelines.',
@@ -73,7 +73,7 @@ setuptools.setup(
             'dbt-redshift==1.7.1',
             'dbt-snowflake==1.7.1',
             'dbt-spark==1.7.1',
-            'dbt-sqlserver==1.3.1',
+            'dbt-sqlserver==1.7.4',
             'dbt-trino==1.7.1',
             'trino~=0.326',
         ],
@@ -149,7 +149,7 @@ setuptools.setup(
             'dbt-redshift==1.7.1',
             'dbt-snowflake==1.7.1',
             'dbt-spark==1.7.1',
-            'dbt-sqlserver==1.3.1',
+            'dbt-sqlserver==1.7.4',
             'dbt-trino==1.7.1',
             'duckdb==0.9.2',
             'elasticsearch==8.9.0',

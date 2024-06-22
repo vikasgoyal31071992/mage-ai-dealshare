@@ -307,7 +307,7 @@ export function roundNumber(number, floatingPoints = 2) {
   return Math.round((number || 0) * denom) / denom;
 }
 
-export function randomNameGenerator() {
+export function randomNameGenerator(): string {
   return `${randomSample(adjectives)} ${randomSample(nouns)}`;
 }
 
@@ -450,4 +450,16 @@ export function containsOnlySpecialCharacters(word: string): boolean {
   const regex = /^[!@#$%^&*()_+\-=\[\]{};':"\\|,.<>\/?]+$/;
 
   return regex.test(word);
+}
+
+export function padString(inputString: string, length: number, padChar: string): string {
+  if (inputString.length >= length) {
+    return inputString;
+  }
+  const padding = padChar.repeat(length - inputString.length);
+  return padding + inputString;
+}
+
+export function hyphenateCamelCase(camelCase: string): string {
+  return camelCase.replace(/([a-z])([A-Z])/g, '$1-$2').toLowerCase();
 }

@@ -47,7 +47,6 @@ from mage_ai.orchestration.db import db_connection, safe_db_query, set_db_schema
 from mage_ai.orchestration.db.database_manager import database_manager
 from mage_ai.orchestration.db.models.oauth import Oauth2Application, Role, User
 from mage_ai.orchestration.utils.distributed_lock import DistributedLock
-from mage_ai.server.active_kernel import switch_active_kernel
 from mage_ai.server.api.base import BaseHandler
 from mage_ai.server.api.blocks import ApiPipelineBlockAnalysisHandler
 from mage_ai.server.api.downloads import ApiDownloadHandler, ApiResourceDownloadHandler
@@ -67,15 +66,17 @@ from mage_ai.server.api.v1 import (
 )
 from mage_ai.server.constants import DATA_PREP_SERVER_PORT
 from mage_ai.server.docs_server import run_docs_server
+from mage_ai.server.events.stream import EventStreamHandler
 from mage_ai.server.file_observer import MetadataEventHandler
 from mage_ai.server.kernel_output_parser import parse_output_message
-from mage_ai.server.kernels import DEFAULT_KERNEL_NAME
 from mage_ai.server.logger import Logger
 from mage_ai.server.scheduler_manager import (
     SCHEDULER_AUTO_RESTART_INTERVAL,
     check_scheduler_status,
     scheduler_manager,
 )
+from mage_ai.server.setup import initialize_globals
+from mage_ai.server.static.files import StaticFileHandler
 from mage_ai.server.subscriber import get_messages
 from mage_ai.server.terminal_server import (
     MageTermManager,
@@ -88,6 +89,9 @@ from mage_ai.services.spark.models.applications import Application
 from mage_ai.services.ssh.aws.emr.utils import file_path as file_path_aws_emr
 from mage_ai.settings import (
     AUTHENTICATION_MODE,
+    DEFAULT_OWNER_EMAIL,
+    DEFAULT_OWNER_PASSWORD,
+    DEFAULT_OWNER_USERNAME,
     DISABLE_AUTO_BROWSER_OPEN,
     DISABLE_AUTORELOAD,
     ENABLE_PROMETHEUS,
@@ -230,7 +234,7 @@ def replace_base_path(base_path: str) -> str:
 
 
 def make_app(
-    template_dir: str = None,
+    template_dir: Optional[str] = None,
     update_routes: bool = False,
     status_only: bool = False,
 ):
@@ -276,29 +280,30 @@ def make_app(
         (r'/manage/(.*)', MainPageHandler),
         (r'/templates', MainPageHandler),
         (r'/version-control', MainPageHandler),
+        (r'/event-streams/(?P<uuid>[\w\-\%2f\.]+)', EventStreamHandler),
         (
             r'/_next/static/(.*)',
-            tornado.web.StaticFileHandler,
+            StaticFileHandler,
             {'path': os.path.join(template_dir, '_next', 'static')},
         ),
         (
             r'/fonts/(.*)',
-            tornado.web.StaticFileHandler,
+            StaticFileHandler,
             {'path': os.path.join(template_dir, 'fonts')},
         ),
         (
             r'/images/(.*)',
-            tornado.web.StaticFileHandler,
+            StaticFileHandler,
             {'path': os.path.join(template_dir, 'images')},
         ),
         (
             r'/monaco-editor/(.*)',
-            tornado.web.StaticFileHandler,
+            StaticFileHandler,
             {'path': os.path.join(template_dir, 'monaco-editor')},
         ),
         (
             r'/(favicon.ico)',
-            tornado.web.StaticFileHandler,
+            StaticFileHandler,
             {'path': template_dir},
         ),
         (r'/websocket/', WebSocketServer),
@@ -494,17 +499,17 @@ def initialize_user_authentication(project_type: ProjectType) -> Oauth2Applicati
             password_salt = generate_salt()
             user = User.query.filter(
                 or_(
-                    User.email == 'admin@admin.com',
-                    User.username == 'admin',
+                    User.email == DEFAULT_OWNER_EMAIL,
+                    User.username == DEFAULT_OWNER_USERNAME,
                 ),
             ).first()
             if not user:
                 user = User.create(
-                    email='admin@admin.com',
-                    password_hash=create_bcrypt_hash('admin', password_salt),
+                    email=DEFAULT_OWNER_EMAIL,
+                    password_hash=create_bcrypt_hash(DEFAULT_OWNER_PASSWORD, password_salt),
                     password_salt=password_salt,
                     roles_new=[default_owner_role],
-                    username='admin',
+                    username=DEFAULT_OWNER_USERNAME,
                 )
         owner_user = user
     else:
@@ -535,6 +540,9 @@ async def main(
     status_only: bool = False,
 ):
     if not status_only:
+        from mage_ai.server.active_kernel import switch_active_kernel
+        from mage_ai.server.kernels import DEFAULT_KERNEL_NAME
+
         switch_active_kernel(DEFAULT_KERNEL_NAME)
 
     # Update base path if environment variable is set
@@ -715,6 +723,8 @@ async def main(
     )
 
     await asyncio.Event().wait()
+    # Used for the magic kernel
+    tornado.ioloop.IOLoop.current().start()
 
 
 def start_server(
@@ -816,6 +826,8 @@ if __name__ == '__main__':
     instance_type = os.getenv(ENV_VAR_INSTANCE_TYPE, args.instance_type)
     project_type = os.getenv(MAGE_PROJECT_TYPE_ENV_VAR, ProjectType.STANDALONE)
     cluster_type = os.getenv(MAGE_CLUSTER_TYPE_ENV_VAR)
+
+    initialize_globals()
 
     start_server(
         host=host,

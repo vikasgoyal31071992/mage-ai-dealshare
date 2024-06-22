@@ -11,19 +11,18 @@ import FileType, {
 import { ALL_BLOCK_TYPES, BlockTypeEnum } from '@interfaces/BlockType';
 import { BLOCK_TYPE_ICON_MAPPING } from '@components/CustomTemplates/BrowseTemplates/constants';
 import {
-  Charts,
-  Ellipsis,
-  FileFill,
-  FolderV2Filled as FolderIcon,
-  Logs,
-  NavGraph,
-  ParentEmpty,
-  Pipeline,
-  PipelineV3,
-  RoundedSquare,
-  Table,
+  Charts as ChartsOracle,
+  Ellipsis as EllipsisOracle,
+  FileFill as FileFillOracle,
+  FolderV2Filled as FolderIconOracle,
+  Logs as LogsOracle,
+  Pipeline as PipelineOracle,
+  PipelineV3 as PipelineV3Oracle,
 } from '@oracle/icons';
-import { FILE_EXTENSION_COLOR_MAPPING, FILE_EXTENSION_ICON_MAPPING } from '@components/FileBrowser/constants';
+import {
+  FILE_EXTENSION_COLOR_MAPPING,
+  FILE_EXTENSION_ICON_MAPPING,
+} from '@components/FileBrowser/constants';
 import { getColorsForBlockType } from '@components/CodeBlock/index.style';
 import {
   getFileExtension,
@@ -35,11 +34,30 @@ import {
 import { singularize } from '@utils/string';
 
 type UseFileIconProps = {
+  BlockIcons?: {
+    [uuid: string]: any;
+  };
+  DefaultIcon?: any;
+  Icons?: {
+    [uuid: string]: any;
+  };
+  IconColors?: {
+    [uuid: string]: string;
+  };
+  ExtensionIcons?: {
+    [uuid: string]: any;
+  };
   allowEmptyFolders?: boolean;
   children?: any;
+  defaultColor?: string;
   disabled?: boolean;
   file?: FileType;
   filePath?: string;
+  getBlockColor?: (
+    blockType: BlockTypeEnum,
+    options: { theme: any },
+  ) => { accent: string; accentDark?: string; accentLight?: string };
+  isFolder?: boolean;
   isInPipelinesFolder?: boolean;
   isFileDisabled?: (filePath: string, children: FileType[]) => boolean;
   isNotFolder?: boolean;
@@ -51,11 +69,19 @@ type UseFileIconProps = {
 };
 
 export default function useFileIcon({
+  BlockIcons = BLOCK_TYPE_ICON_MAPPING,
+  DefaultIcon,
+  ExtensionIcons = FILE_EXTENSION_ICON_MAPPING,
+  IconColors = FILE_EXTENSION_COLOR_MAPPING,
+  Icons,
   allowEmptyFolders,
   children,
+  defaultColor,
   disabled: disabledProp,
   file,
   filePath,
+  getBlockColor,
+  isFolder: isFolderProp,
   isInPipelinesFolder,
   isFileDisabled,
   isNotFolder,
@@ -65,88 +91,99 @@ export default function useFileIcon({
   useRootFolder,
   uuid,
 }: UseFileIconProps) {
-  const filePathToUse: string = useMemo(() => filePath
-    ? filePath
-    : (useRootFolder
-      ? getFullPath(file)
-      : getFullPathWithoutRootFolder(file)
-    )
-  , [
-    file,
-    filePath,
-    useRootFolder,
-  ]);
+  const { Charts, Ellipsis, FileFill, FolderIcon, Logs, Pipeline, PipelineV3 } = Icons || {
+    Charts: ChartsOracle,
+    Ellipsis: EllipsisOracle,
+    FileFill: FileFillOracle,
+    FolderIcon: FolderIconOracle,
+    Logs: LogsOracle,
+    Pipeline: PipelineOracle,
+    PipelineV3: PipelineV3Oracle,
+  };
 
-  const isFolder = useMemo(() => !!children && !isNotFolder, [children, isNotFolder]);
+  const filePathToUse: string = useMemo(
+    () =>
+      filePath ? filePath : useRootFolder ? getFullPath(file) : getFullPathWithoutRootFolder(file),
+    [file, filePath, useRootFolder],
+  );
 
-  const folderNameForBlock = useMemo(() => uuid?.split?.('/')?.find?.(
-    (key) => {
-      const keySingle = singularize(key);
+  const isFolder = useMemo(
+    () => isFolderProp || (!!children && !isNotFolder),
+    [children, isFolderProp, isNotFolder],
+  );
 
-      return keySingle in ALL_BLOCK_TYPES;
-    },
-  ), [uuid]);
-  const blockType = useMemo(() => folderNameForBlock ? singularize(folderNameForBlock) : null, [
-    folderNameForBlock,
-  ]);
-  const isFirstParentFolderForBlock = useMemo(() => isFolder && folderNameForBlock && folderNameForBlock === name, [
-    folderNameForBlock,
-    isFolder,
-    name,
-  ]);
-  const isBlockFile = useMemo(() => folderNameForBlock
-    && !isFolder
-    && validBlockFileExtension(name)
-    && validBlockFromFilename(name, blockType), [
-      blockType,
-      folderNameForBlock,
-      isFolder,
-      name,
-    ]);
+  const folderNameForBlock = useMemo(
+    () =>
+      uuid?.split?.('/')?.find?.(key => {
+        const keySingle = singularize(key);
 
-  const color = useMemo(() => folderNameForBlock
-    ? getColorsForBlockType(blockType, { theme }).accent
-    : null,
-    [
-      blockType,
-      folderNameForBlock,
-    ]);
+        return keySingle in ALL_BLOCK_TYPES;
+      }),
+    [uuid],
+  );
+  const blockType = useMemo(
+    () => (folderNameForBlock ? singularize(folderNameForBlock) : null),
+    [folderNameForBlock],
+  );
+  const isFirstParentFolderForBlock = useMemo(
+    () => isFolder && folderNameForBlock && folderNameForBlock === name,
+    [folderNameForBlock, isFolder, name],
+  );
+  const isBlockFile = useMemo(
+    () =>
+      folderNameForBlock &&
+      !isFolder &&
+      validBlockFileExtension(name) &&
+      validBlockFromFilename(name, blockType),
+    [blockType, folderNameForBlock, isFolder, name],
+  );
+
+  const color = useMemo(
+    () =>
+      folderNameForBlock
+        ? getBlockColor
+          ? getBlockColor?.(blockType, { theme })?.accent
+          : getColorsForBlockType(blockType, { theme }).accent
+        : null,
+    [blockType, getBlockColor, folderNameForBlock, theme],
+  );
 
   const isPipelineFolder = name === FOLDER_NAME_PIPELINES;
 
-  const disabled = useMemo(() => isFileDisabled
-    ? isFileDisabled(filePathToUse, children)
-    : disabledProp
-      || (isInPipelinesFolder && name === '__init__.py')
-      || (folderNameForBlock && name === '__init__.py'),
-  [
-    children,
-    disabledProp,,
-    filePathToUse,
-    folderNameForBlock,
-    isFileDisabled,
-    isInPipelinesFolder,
-    name,
-  ]);
+  const disabled = useMemo(
+    () =>
+      isFileDisabled
+        ? isFileDisabled(filePathToUse, children)
+        : disabledProp ||
+          (isInPipelinesFolder && name === '__init__.py') ||
+          (folderNameForBlock && name === '__init__.py'),
+    [
+      children,
+      disabledProp,
+      ,
+      filePathToUse,
+      folderNameForBlock,
+      isFileDisabled,
+      isInPipelinesFolder,
+      name,
+    ],
+  );
 
-  const {
-    Icon,
-    iconColor,
-  } = useMemo(() => {
+  const { Icon, iconColor } = useMemo(() => {
     let iconColorInner;
-    let IconInner = FileFill;
+    let IconInner = DefaultIcon || FileFill;
 
     const { extension } = file || { extension: null };
 
     if (!isFolder && isNotFolder) {
       IconInner = Ellipsis;
     } else if (isPipelineFolder) {
-      IconInner = PipelineV3
+      IconInner = PipelineV3;
     } else if (name === FOLDER_NAME_CHARTS) {
       IconInner = Charts;
     } else if (isFolder && !extension) {
       if (isFirstParentFolderForBlock) {
-        IconInner = BLOCK_TYPE_ICON_MAPPING?.[blockType] || FolderIcon;
+        IconInner = BlockIcons?.[blockType] || FolderIcon;
       } else {
         IconInner = FolderIcon;
       }
@@ -158,25 +195,37 @@ export default function useFileIcon({
       IconInner = Logs;
     } else if (!isFolder || extension) {
       const fx = extension || getFileExtension(name);
-      if (fx && fx in FILE_EXTENSION_ICON_MAPPING) {
-        IconInner = FILE_EXTENSION_ICON_MAPPING[fx];
-        iconColorInner = FILE_EXTENSION_COLOR_MAPPING[fx];
+      if (fx && fx in ExtensionIcons) {
+        IconInner = ExtensionIcons[fx];
+        iconColorInner = IconColors[fx] || defaultColor;
       }
     }
 
     return {
       Icon: IconInner,
       iconColor: iconColorInner,
-   };
+    };
   }, [
+    DefaultIcon,
+    BlockIcons,
+    Charts,
+    Ellipsis,
+    ExtensionIcons,
+    FileFill,
+    FolderIcon,
+    IconColors,
+    Logs,
+    Pipeline,
+    PipelineV3,
+    isPipelineFolder,
     allowEmptyFolders,
+    defaultColor,
     blockType,
     file,
     isFirstParentFolderForBlock,
     isFolder,
     isInPipelinesFolder,
     isNotFolder,
-    level,
     name,
   ]);
 
@@ -187,9 +236,7 @@ export default function useFileIcon({
     }
 
     return BlockIconInner;
-  }, [
-    blockType,
-  ]);
+  }, [Charts, blockType]);
 
   return {
     BlockIcon,
